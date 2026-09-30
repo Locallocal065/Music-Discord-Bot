@@ -770,45 +770,106 @@ function isGuildAdmin(member) {
     return member.permissions?.has?.(PermissionFlagsBits.ManageGuild);
   } catch { return false; }
 }
-function buildControlRows(state = null, expanded = state?.showAdvancedControls === true) {
+function buildTransportRows(state = null) {
   const paused = state?.player?.state?.status === AudioPlayerStatus.Paused;
   const r1 = new ActionRowBuilder().addComponents(
     new ButtonBuilder().setCustomId("mus_prev").setLabel("Prev").setEmoji("⏮").setStyle(ButtonStyle.Secondary),
     new ButtonBuilder().setCustomId("mus_resume").setLabel(paused ? "Play" : "Pause").setEmoji(paused ? "▶" : "⏸").setStyle(paused ? ButtonStyle.Success : ButtonStyle.Secondary),
     new ButtonBuilder().setCustomId("mus_skip").setLabel("Skip").setEmoji("⏭").setStyle(ButtonStyle.Primary),
     new ButtonBuilder().setCustomId("mus_stop").setLabel("Stop").setEmoji("⏹").setStyle(ButtonStyle.Danger),
-    new ButtonBuilder().setCustomId(expanded ? "mus_less" : "mus_more").setLabel(expanded ? "Hide" : "More").setEmoji(expanded ? "➖" : "⚙️").setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder().setCustomId("mus_queue").setLabel("List").setEmoji("📋").setStyle(ButtonStyle.Secondary),
   );
-  if (!expanded) return [r1];
+  const lyricsOn = state ? state.showLyrics !== false : true;
   const r2 = new ActionRowBuilder().addComponents(
-    new ButtonBuilder().setCustomId("mus_queue").setLabel("Queue").setEmoji("📋").setStyle(ButtonStyle.Secondary),
-    new ButtonBuilder().setCustomId("mus_shuffle").setLabel("Shuffle").setEmoji("🔀").setStyle(ButtonStyle.Secondary),
-    new ButtonBuilder().setCustomId("mus_speed").setLabel("Speed").setEmoji("⏩").setStyle(ButtonStyle.Secondary),
-    new ButtonBuilder().setCustomId("mus_loop").setLabel("Loop").setEmoji("🔁").setStyle(ButtonStyle.Secondary),
-    new ButtonBuilder().setCustomId("mus_volup").setLabel("+20").setEmoji("🔊").setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder().setCustomId("mus_loop").setLabel(`Loop: ${state ? loopLabel(state.loopMode).replace(/^[^\s]+\s/, "") : "Off"}`).setEmoji("🔁").setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder().setCustomId("mus_speed").setLabel(`Speed: ${state && Number(state.speed) ? state.speed : 1}x`).setEmoji("⏩").setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder().setCustomId("mus_lyrics").setLabel(`Lyrics: ${lyricsOn ? "On" : "Off"}`).setEmoji("📝").setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder().setCustomId("mus_volup").setLabel("Vol +").setEmoji("🔊").setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder().setCustomId("mus_voldown").setLabel("Vol −").setEmoji("🔉").setStyle(ButtonStyle.Secondary),
   );
-  const r3 = new ActionRowBuilder().addComponents(
-    new ButtonBuilder().setCustomId("mus_voldown").setLabel("-20").setEmoji("🔉").setStyle(ButtonStyle.Secondary),
+  return [r1, r2];
+}
+// Setup is done once the guild has both bocchi rooms (text + saved voice).
+function isBocchiSetup(state) {
+  const guild = state?.guildId ? client.guilds.cache.get(state.guildId) : null;
+  if (!guild) return false;
+  const hasText = guild.channels.cache.some((c) =>
+    c.type === ChannelType.GuildText && c.name.toLowerCase() === "bocchi");
+  return hasText && !!getSavedMusicVoice(guild.id);
+}
+// Settings row: always visible so a hidden-controls panel can be reopened.
+// The /setup button hides itself once the bocchi rooms already exist.
+function buildSettingsRow(state = null) {
+  const shown = !state || state.showControls !== false;
+  const row = new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId("mus_controls").setLabel(`Controls: ${shown ? "Show" : "Hidden"}`).setEmoji("🎛").setStyle(ButtonStyle.Secondary),
   );
-  return [r1, r2, r3];
+  if (!isBocchiSetup(state)) {
+    row.addComponents(new ButtonBuilder().setCustomId("mus_setup").setLabel("/setup").setEmoji("🛠").setStyle(ButtonStyle.Secondary));
+  }
+  return row;
+}
+function buildControlRows(state = null) {
+  const rows = [];
+  const [r1, r2] = buildTransportRows(state);
+  rows.push(r1);
+  if (!state || state.showControls !== false) rows.push(r2);
+  rows.push(buildSettingsRow(state));
+  return rows;
 }
 function buildPanelEmbed(guild) {
   const st = getGuildState(guild);
   const cur = st.current ? `**${st.current.title}**\n👤 ${st.current.requestedBy}` : "— idle —\nuse `/play` or `n!play` to add songs";
   const next = st.queue.slice(0, 3).map((x, i) => `\`${i + 1}.\` ${x.title}`).join("\n") || "—";
   const ck = ytCookiesStatus();
-  const panel = new EmbedBuilder().setColor(0x5865F2).setTitle("🎛 Music Panel")
-    .setDescription("Press the buttons — you must share a voice channel with the bot")
+  const room = getSavedControlChannel(guild.id) ? `<#${getSavedControlChannel(guild.id)}>` : "#bocchi (auto)";
+  const panel = new EmbedBuilder().setColor(0x5865F2).setTitle("🎛 Music Panel — Settings")
+    .setDescription("Press the buttons — you must share a voice channel with the bot\nAll bot messages live in " + room)
     .addFields(
       { name: "🎵 Now", value: cur, inline: false },
       { name: "📋 Next", value: next, inline: false },
       { name: "🔊 Volume", value: `${st.volumePct}%`, inline: true },
       { name: "🔁 Loop", value: loopLabel(st.loopMode), inline: true },
+      { name: "⏩ Speed", value: `${Number(st.speed) || 1}x`, inline: true },
+      { name: "📝 Lyrics", value: st.showLyrics !== false ? "On" : "Off", inline: true },
+      { name: "🎛 Controls", value: st.showControls !== false ? "Show" : "Hidden", inline: true },
+      { name: " Room", value: room, inline: true },
       { name: "🍪 YouTube", value: ck.exists ? `✅ signed in (${ck.size}b)` : "❌ not signed — admin, use `/ytsignin`", inline: true },
     ).setTimestamp();
   const pt = st.current ? (st.current.thumb || thumbFor(st.current.source)) : null;
   if (pt) panel.setThumbnail(pt);
   return panel;
+}
+// /setup in one place (slash, prefix, panel button): voice room "bocchi" +
+// text room #bocchi (created when missing), then post the living panel there.
+async function runBocchiSetup(guild) {
+  let voiceRoom = guild.channels.cache.find((candidate) =>
+    candidate.type === ChannelType.GuildVoice && candidate.name.toLowerCase() === "bocchi");
+  if (!voiceRoom) {
+    voiceRoom = await guild.channels.create({
+      name: "bocchi",
+      type: ChannelType.GuildVoice,
+      reason: "Create the bocchi music room",
+    });
+  }
+  setSavedMusicVoice(guild.id, voiceRoom.id);
+  const state = getGuildState(guild);
+  ensureVC(guild, voiceRoom.id, state);
+  const channel = await resolveBotTextChannel(guild, null);
+  if (!channel) throw new Error("I could not create or find #bocchi. Check Manage Channels, View Channel and Send Messages permissions.");
+  const panel = state.current ? buildNowPlayingEmbed(state, state.currentLyrics) : buildPanelEmbed(guild);
+  const ref = await upsertNpMessage(guild, channel.id, panel, true);
+  if (!ref) throw new Error("I could not send the panel there. Check View Channel, Send Messages, and Embed Links permissions.");
+  if (state.current) startNowPlayingTicker(guild, state);
+  return { voiceRoom, channel };
+}
+// Re-render the living Now Playing message so button labels (loop/speed/lyrics) stay live.
+async function refreshNpControls(guild, state) {
+  try {
+    if (!state.npMessage) return;
+    const embed = state.current ? buildNowPlayingEmbed(state, state.currentLyrics) : buildPanelEmbed(guild);
+    await upsertNpMessage(guild, state.npMessage.channelId, embed, true);
+  } catch (e) { logPretty("WARN", `Panel refresh failed: ${e?.message || e}`); }
 }
 async function handleMusicButton(itx) {
   const id = itx.customId;
@@ -817,11 +878,7 @@ async function handleMusicButton(itx) {
   const me = guild.members.me;
   const userVC = itx.member?.voice?.channelId;
   const botVC = me?.voice?.channelId;
-  const needsVC = !["mus_queue", "mus_panel"].includes(id);
-  if (id === "mus_more" || id === "mus_less") {
-    state.showAdvancedControls = id === "mus_more";
-    return itx.update({ components: buildControlRows(state) });
-  }
+  const needsVC = !["mus_queue", "mus_panel", "mus_lyrics", "mus_controls", "mus_setup"].includes(id);
   if (needsVC && (!userVC || (botVC && botVC !== userVC))) {
     return itx.reply({ content: "Please join the bot's voice channel first 🎙️", flags: MessageFlags.Ephemeral });
   }
@@ -840,7 +897,7 @@ async function handleMusicButton(itx) {
       state.queue.unshift({ title: prev.title, source: prev.source, thumb: prev.thumb || null, durationSec: prev.durationSec || null, requestedBy: prev.requestedBy || itx.user.tag, guild: g, voiceChannelId: userVC, textChannelId: itx.channelId });
       state.skipRequested = true;
       state.prevJump = true;
-      try { state.player.stop(true); } catch { }
+      try { state.player.stop(true); } catch {}
       cleanupCurrentPipeline(state);
       return itx.reply({ content: `⏮ Back to **${cleanTitle(prev.title)}**`, flags: MessageFlags.Ephemeral });
     } catch (e) { return itx.reply({ content: "Previous failed: " + (e?.message || e), flags: MessageFlags.Ephemeral }); }
@@ -860,15 +917,24 @@ async function handleMusicButton(itx) {
   if (id === "mus_speed") {
     try {
       const ns = (Number(state.speed) || 1) === 1 ? 2 : 1;
+      const resumeAt = state.current ? playbackSeconds(state) : 0;
       state.speed = ns;
-      try { if (state.guildId) setSavedSpeed(state.guildId, ns); } catch { }
+      try { if (state.guildId) setSavedSpeed(state.guildId, ns); } catch {}
       if (state.current) {
-        // Speed applies at encode time: restart the track at the new speed.
+        // Speed applies at encode time, so the pipe must respawn — but seeking
+        // it to the live position keeps playback seamless (never from 0:00).
+        await itx.deferReply({ flags: MessageFlags.Ephemeral });
+        state.current.offsetSec = resumeAt;
         await playSame(itx.guild, state.current.textChannelId, state.current, state);
-        return itx.reply({ content: `⏩ Speed ${ns}x — restarted track (applies to queue too)`, flags: MessageFlags.Ephemeral });
+        await refreshNpControls(guild, state);
+        return itx.editReply({ content: `⏩ Speed ${ns}x — continuing from ${fmtTime(resumeAt)}, no restart` });
       }
+      await refreshNpControls(guild, state);
       return itx.reply({ content: `⏩ Speed set to ${ns}x`, flags: MessageFlags.Ephemeral });
-    } catch (e) { return itx.reply({ content: "Speed change failed: " + (e?.message || e), flags: MessageFlags.Ephemeral }); }
+    } catch (e) {
+      const rp = itx.deferred ? itx.editReply.bind(itx) : (o) => itx.reply({ ...o, flags: MessageFlags.Ephemeral });
+      return rp({ content: "Speed change failed: " + (e?.message || e) });
+    }
   }
   if (id === "mus_skip") { state.skipRequested = true; try { state.player.stop(true); } catch { } cleanupCurrentPipeline(state); return itx.reply({ content: "⏭ Skipped", flags: MessageFlags.Ephemeral }); }
   if (id === "mus_stop") {
@@ -890,7 +956,28 @@ async function handleMusicButton(itx) {
   }
   if (id === "mus_loop") {
     state.loopMode = state.loopMode === "off" ? "track" : state.loopMode === "track" ? "queue" : "off";
+    await refreshNpControls(guild, state);
     return itx.reply({ content: `🔁 Loop: **${loopLabel(state.loopMode)}**`, flags: MessageFlags.Ephemeral });
+  }
+  if (id === "mus_controls") {
+    state.showControls = !(state.showControls !== false);
+    try { if (state.guildId) setSavedShowControls(state.guildId, state.showControls); } catch {}
+    await refreshNpControls(guild, state);
+    return itx.reply({ content: state.showControls ? "🎛 Controls Show" : "🎛 Controls hidden — the settings row stays so you can bring them back", flags: MessageFlags.Ephemeral });
+  }
+  if (id === "mus_setup") {
+    if (!isGuildAdmin(itx.member)) return itx.reply({ content: "Manage Server permission required.", flags: MessageFlags.Ephemeral });
+    try {
+      const { voiceRoom, channel } = await runBocchiSetup(guild);
+      await refreshNpControls(guild, state);
+      return itx.reply({ content: `🛠 Setup done — voice <#${voiceRoom.id}> + text <#${channel.id}>`, flags: MessageFlags.Ephemeral });
+    } catch (e) { return itx.reply({ content: "Setup failed: " + (e?.message || e), flags: MessageFlags.Ephemeral }); }
+  }
+  if (id === "mus_lyrics") {
+    state.showLyrics = !(state.showLyrics !== false);
+    try { if (state.guildId) setSavedShowLyrics(state.guildId, state.showLyrics); } catch {}
+    await refreshNpControls(guild, state);
+    return itx.reply({ content: state.showLyrics ? "📝 Karaoke lyrics on — sing along!" : "📝 Lyrics hidden", flags: MessageFlags.Ephemeral });
   }
   if (id === "mus_volup") { setVolumePct(state, (state.volumePct || 100) + 20); return itx.reply({ content: `🔊 ${state.volumePct}%`, flags: MessageFlags.Ephemeral }); }
   if (id === "mus_voldown") { setVolumePct(state, Math.max(0, (state.volumePct || 100) - 20)); return itx.reply({ content: `🔉 ${state.volumePct}%`, flags: MessageFlags.Ephemeral }); }
@@ -1014,7 +1101,7 @@ function buildHelpEmbedSlash() {
           "`/deletep confirm:true` — Delete all messages in public AI chat (Manage Messages)",
           "`/clear` — Clear this server's AI history (Manage Channels)",
           "`/setai` — Create a public AI chat channel (Manage Channels)",
-          "`/setup` — Create or reuse the #bocchi music room (Manage Server)",
+          "`/setup` — Create or reuse the music control room (Manage Server)",
           "`/botupdate` — Update yt-dlp",
           "`/help` — Show this guide",
         ].join("\n"),
@@ -1086,6 +1173,13 @@ function loopLabel(mode) {
   if (mode === "queue") return "🔁 Loop whole queue";
   return "➡️ Off";
 }
+function shuffleArray(arr) {
+  for (let i = arr.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [arr[i], arr[j]] = [arr[j], arr[i]];
+  }
+  return arr;
+}
 // ---- Clean + dynamic Now Playing UI ----
 function cleanTitle(t, max = 90) {
   let s = String(t ?? "Unknown").split("\n")[0].trim();
@@ -1120,21 +1214,30 @@ function progressLine(state) {
   const w = 12, fill = Math.round(p * w);
   return `${"█".repeat(fill)}${"░".repeat(w - fill)} ${fmtTime(el)} / ${fmtTime(dur)}`;
 }
-// Lyrics via LRCLIB (free, no key). Cached per title. Returns null when missing.
+// Lyrics via LRCLIB (free, no key). Cached per title. Returns plain text plus
+// timestamped `synced` lines for karaoke scrolling, or null when missing.
 const lyricCache = new Map();
-function parseSyncedLyrics(source) {
-  const lines = [];
-  const timestampPattern = /\[(\d{2}):(\d{2})(?:\.(\d{1,3}))?\]/g;
-  for (const rawLine of String(source || "").split(/\r?\n/)) {
-    const timestamps = [...rawLine.matchAll(timestampPattern)];
-    const text = rawLine.replace(timestampPattern, "").trim();
-    if (!text) continue;
-    for (const timestamp of timestamps) {
-      const fraction = timestamp[3] ? Number(`0.${timestamp[3].padEnd(3, "0")}`) : 0;
-      lines.push({ time: Number(timestamp[1]) * 60 + Number(timestamp[2]) + fraction, text });
-    }
+function parseSyncedLyrics(synced) {
+  const out = [];
+  for (const rawLine of String(synced || "").split(/\r?\n/)) {
+    const m = rawLine.match(/^\s*\[(\d+):(\d+(?:\.\d+)?)\]\s*(.*)$/);
+    if (!m) continue;
+    const t = Number(m[1]) * 60 + Number(m[2]);
+    const text = (m[3] || "").trim().slice(0, 160);
+    if (!Number.isFinite(t) || t < 0 || !text) continue;
+    out.push({ t, text });
+    if (out.length >= 400) break;
   }
-  return lines.sort((a, b) => a.time - b.time);
+  out.sort((a, b) => a.t - b.t);
+  return out;
+}
+function lyricIndexAt(synced, elapsedSec) {
+  let idx = -1;
+  for (let i = 0; i < synced.length; i++) {
+    if (synced[i].t <= elapsedSec + 0.25) idx = i;
+    else break;
+  }
+  return idx;
 }
 async function fetchLyrics(title) {
   const key = String(title || "").slice(0, 80).toLowerCase().trim();
@@ -1145,22 +1248,56 @@ async function fetchLyrics(title) {
       const q = encodeURIComponent(cleanTitle(title, 80));
       const s = await fetchJsonWithTimeout(`https://lrclib.net/api/search?q=${q}`, 7000);
       const arr = Array.isArray(s) ? s : [];
-      const best = arr.find((x) => x && (x.plainLyrics || x.syncedLyrics)) || null;
+      const best = arr.find((x) => x && x.syncedLyrics) || arr.find((x) => x && x.plainLyrics) || null;
       if (!best) return null;
-      const syncedLines = parseSyncedLyrics(best.syncedLyrics);
+      const synced = parseSyncedLyrics(best.syncedLyrics);
       let text = String(best.plainLyrics || "").trim();
-      if (!text && syncedLines.length) text = syncedLines.map((line) => line.text).join("\n");
       if (!text && best.syncedLyrics) text = String(best.syncedLyrics).replace(/^\[\d+:\d+\.\d+\]\s*/gm, "").trim();
       if (!text) return null;
-      if (/^\[?instrumental\]?$/i.test(text)) return { text: "🎵 Instrumental", lines: [], artist: best.artistName || null, name: best.trackName || null };
+      if (/^\[?instrumental\]?$/i.test(text)) return { text: "🎵 Instrumental", synced: [], artist: best.artistName || null, name: best.trackName || null };
       if (text.length < 20) return null;
       if (text.length > 900) text = text.slice(0, 900).trim() + "…";
-      return { text, lines: syncedLines, artist: best.artistName || null, name: best.trackName || null };
+      return { text, synced, artist: best.artistName || null, name: best.trackName || null };
     } catch { return null; }
   })();
   lyricCache.set(key, p);
-  if (lyricCache.size > 200) { try { lyricCache.delete(lyricCache.keys().next().value); } catch { } }
+  if (lyricCache.size > 200) { try { lyricCache.delete(lyricCache.keys().next().value); } catch {} }
   return p;
+}
+// Spotify-style karaoke block: a scrolling window of lines around the current
+// position — sung lines dimmed, the live line highlighted, upcoming lines plain.
+// Driven by track position so the window auto-scrolls as the song plays.
+function karaokeField(state, lyrics, estimated = false) {
+  const el = playbackSeconds(state);
+  const synced = lyrics.synced;
+  const idx = lyricIndexAt(synced, el);
+  const PAST = 2, FUTURE = 4;
+  const rows = [];
+  if (idx < 0) {
+    rows.push("*♪ Intro — get ready…*");
+    for (let i = 0; i < Math.min(FUTURE + 1, synced.length); i++) rows.push(`　${synced[i].text}`);
+  } else {
+    const start = Math.max(0, idx - PAST);
+    for (let i = start; i < idx; i++) rows.push(`╰╴${synced[i].text}`);
+    rows.push(`**🎤▶ ${synced[idx].text}**`);
+    for (let i = idx + 1; i < synced.length && rows.length < PAST + 1 + FUTURE; i++) rows.push(`　${synced[i].text}`);
+    if (idx >= synced.length - 1) rows.push("*♪ Outro…*");
+  }
+  let value = rows.join("\n");
+  if (value.length > 1000) value = value.slice(0, 997).trimEnd() + "…";
+  const by = lyrics.artist ? ` · ${lyrics.artist}` : "";
+  const est = estimated ? " · ~timing estimated" : "";
+  return { name: `🎤 Karaoke — sing along${by}${est}`, value: `​\n${value}\n​`, inline: false };
+}
+// No synced LRC available? Spread the plain lines evenly over the track so the
+// karaoke highlight still scrolls (clearly labelled as estimated).
+function estimateSyncedLyrics(text, durationSec) {
+  const lines = String(text).split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+  if (lines.length < 2 || lines.length > 200) return [];
+  const start = Math.max(5, durationSec * 0.06);
+  const end = durationSec * 0.97;
+  const step = (end - start) / lines.length;
+  return lines.map((line, i) => ({ t: start + i * step, text: line.slice(0, 160) }));
 }
 function buildNowPlayingEmbed(state, lyrics) {
   const cur = state.current;
@@ -1179,25 +1316,22 @@ function buildNowPlayingEmbed(state, lyrics) {
   if (cur?.source && isUrl(cur.source)) e.setURL(cur.source);
   const t = cur ? (cur.thumb || thumbFor(cur.source)) : null;
   if (t) e.setThumbnail(t);
-  if (lyrics?.lines?.length) {
-    const playhead = playbackSeconds(state);
-    const nextIndex = lyrics.lines.findIndex((line) => line.time > playhead);
-    const activeIndex = nextIndex === -1 ? lyrics.lines.length - 1 : Math.max(0, nextIndex - 1);
-    const currentLine = lyrics.lines[activeIndex];
-    const nextLine = lyrics.lines[activeIndex + 1];
-    const previousLine = lyrics.lines[activeIndex - 1];
-    const lyricValue = [
-      previousLine ? `-# ${cleanTitle(previousLine.text, 160)}` : null,
-      `> **${cleanTitle(currentLine.text, 180)}**`,
-      nextLine ? cleanTitle(nextLine.text, 180) : null,
-    ].filter(Boolean).join("\n");
-    e.addFields({ name: `🎤 Live lyrics${lyrics.artist ? ` · ${lyrics.artist}` : ""}`, value: lyricValue, inline: false });
-  } else if (lyrics && lyrics.text) {
-    const lines = lyrics.text.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
-    let preview = lines.slice(0, 4).join("\n");
-    if (preview.length > 280) preview = preview.slice(0, 277).trimEnd() + "...";
-    else if (lines.length > 4) preview += "\n…";
-    e.addFields({ name: `📝 Lyrics preview${lyrics.artist ? ` · ${lyrics.artist}` : ""}`, value: preview, inline: false });
+  if (lyrics && lyrics.text) {
+    let synced = Array.isArray(lyrics.synced) ? lyrics.synced : [];
+    let estimated = false;
+    if (!synced.length && Number.isFinite(dur) && dur > 30 && !/^🎵/.test(lyrics.text)) {
+      synced = estimateSyncedLyrics(lyrics.text, dur);
+      estimated = synced.length > 0;
+    }
+    if (state.showLyrics !== false && synced.length) {
+      e.addFields(karaokeField(state, { ...lyrics, synced }, estimated));
+    } else {
+      const lines = lyrics.text.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+      let preview = lines.slice(0, 4).join("\n");
+      if (preview.length > 280) preview = preview.slice(0, 277).trimEnd() + "...";
+      else if (lines.length > 4) preview += "\n…";
+      e.addFields({ name: `📝 Lyrics preview${lyrics.artist ? ` · ${lyrics.artist}` : ""}`, value: preview, inline: false });
+    }
   }
   return e;
 }
@@ -1215,32 +1349,71 @@ function startNowPlayingTicker(guild, state) {
     if (state.player.state.status === AudioPlayerStatus.Paused || state.npRefreshing) return;
     state.npRefreshing = true;
     try {
-      const channelId = getSavedControlChannel(state.guildId) || state.current.textChannelId;
-      await upsertNpMessage(guild, channelId, buildNowPlayingEmbed(state, state.currentLyrics), true);
+      await upsertNpMessage(guild, state.npMessage.channelId, buildNowPlayingEmbed(state, state.currentLyrics), true);
     } catch (error) {
       logPretty("WARN", `Now Playing ticker failed: ${error?.message || error}`);
     } finally {
       state.npRefreshing = false;
     }
-  }, 2000);
+  }, 3000);
   state.npRefreshTimer.unref?.();
 }
+// One dedicated text room per server: #bocchi. Every bot message/panel lives
+// there — an existing #bocchi wins, else the bot creates it. A previously
+// saved channel is only a last-resort fallback (e.g. no Manage Channels),
+// so a stale setting can never keep bot messages out of #bocchi.
+const bocchiCreateCooldown = new Map();
+async function resolveBotTextChannel(guild, fallbackId) {
+  const bocchi = guild.channels.cache.find((c) =>
+    c.type === ChannelType.GuildText && c.name.toLowerCase() === "bocchi");
+  if (bocchi) {
+    if (getSavedControlChannel(guild.id) !== bocchi.id) {
+      try { setSavedControlChannel(guild.id, bocchi.id); } catch { }
+    }
+    return bocchi;
+  }
+  const lastTry = bocchiCreateCooldown.get(guild.id) || 0;
+  if (Date.now() - lastTry > 60000) {
+    bocchiCreateCooldown.set(guild.id, Date.now());
+    try {
+      const created = await guild.channels.create({
+        name: "bocchi",
+        type: ChannelType.GuildText,
+        topic: "Bocchi music room — live karaoke lyrics, music panel and bot messages.",
+        permissionOverwrites: [{
+          id: guild.roles.everyone.id,
+          allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.ReadMessageHistory],
+        }],
+        reason: "Create the bocchi text room",
+      });
+      try { setSavedControlChannel(guild.id, created.id); } catch { }
+      logPretty("SYSTEM", `Created #bocchi text room in ${guild.name}`);
+      return created;
+    } catch (e) {
+      logPretty("WARN", `Could not create #bocchi in ${guild.name}: ${e?.message || e}`);
+    }
+  }
+  const savedId = getSavedControlChannel(guild.id);
+  const saved = savedId ? guild.channels.cache.get(savedId) : null;
+  if (saved?.isTextBased?.()) return saved;
+  const fb = fallbackId ? guild.channels.cache.get(fallbackId) : null;
+  return fb?.isTextBased?.() ? fb : null;
+}
 // One living Now Playing message per guild: edit it on track change instead
-// of spamming a new embed every song.
+// of spamming a new embed every song. Always lives in #bocchi.
 async function upsertNpMessage(guild, channelId, embed, withControls = true) {
   const st = getGuildState(guild);
+  const ch = await resolveBotTextChannel(guild, channelId);
+  if (!ch) return null;
   const old = st.npMessage;
   const components = withControls ? buildControlRows(st) : [];
   try {
-    if (old && old.channelId === channelId) {
-      const ch = guild.channels.cache.get(old.channelId);
-      if (ch && ch.isTextBased?.()) {
-        const msg = await ch.messages.fetch(old.messageId);
-        if (msg) { await msg.edit({ embeds: [embed], components }); return old; }
-      }
+    if (old && old.channelId === ch.id) {
+      const msg = await ch.messages.fetch(old.messageId);
+      if (msg) { await msg.edit({ embeds: [embed], components }); return old; }
     }
   } catch { }
-  if (old && old.channelId !== channelId) {
+  if (old && old.channelId !== ch.id) {
     try {
       const previousChannel = guild.channels.cache.get(old.channelId);
       const previousMessage = previousChannel?.isTextBased?.()
@@ -1250,13 +1423,10 @@ async function upsertNpMessage(guild, channelId, embed, withControls = true) {
     } catch { }
   }
   try {
-    const ch = guild.channels.cache.get(channelId);
-    if (ch && ch.isTextBased?.()) {
-      const msg = await ch.send({ embeds: [embed], components });
-      const ref = { channelId, messageId: msg.id };
-      st.npMessage = ref;
-      return ref;
-    }
+    const msg = await ch.send({ embeds: [embed], components });
+    const ref = { channelId: ch.id, messageId: msg.id };
+    st.npMessage = ref;
+    return ref;
   } catch { }
   return null;
 }
@@ -1301,7 +1471,7 @@ async function handlePrivateAiMessage(msg, session) {
     const message = error?.name === "AbortError"
       ? "Gemini took too long to respond. Please try again."
       : (error?.message || "Gemini request failed.");
-    await msg.reply({ content: message, allowedMentions: { parse: [] } }).catch(() => { });
+    await msg.reply({ content: message, allowedMentions: { parse: [] } }).catch(() => {});
   } finally {
     aiChatBusy.delete(sessionKey);
   }
@@ -1325,16 +1495,225 @@ async function handleAiChatMessage(msg) {
     const message = error?.name === "AbortError"
       ? "Gemini took too long to respond. Please try again."
       : (error?.message || "Gemini request failed.");
-    await msg.reply({ content: message, allowedMentions: { parse: [] } }).catch(() => { });
+    await msg.reply({ content: message, allowedMentions: { parse: [] } }).catch(() => {});
   } finally {
     aiChatBusy.delete(sessionKey);
   }
 }
 
+// ────────────────────────────────────────────────────────────────────────────
+// Private chat (DM) support: the bot answers EVERYTHING typed in DMs. Safe
+// commands run against the shared server; dangerous/admin commands are
+// filtered out; plain text gets a conversational reply.
+const DM_BLOCKED_COMMANDS = new Set(["ytsignin", "ytsignout", "botupdate", "setup", "setai", "setaip", "delete", "deletep", "clear", "airef", "vstate", "watchtogether", "video"]);
+const DM_MUSIC_COMMANDS = new Set(["play", "playlist", "skip", "stop", "pause", "resume", "queue", "np", "remove", "shuffle", "loop", "volume", "panel"]);
+const DM_COMMAND_ALIASES = { p: "play", q: "queue", now: "np", next: "skip", s: "skip", st: "stop", vol: "volume", upd: "botupdate", h: "help", controls: "panel" };
+async function dmTargetGuild(userId) {
+  let mutual = null;
+  for (const guild of client.guilds.cache.values()) {
+    let member = guild.members.cache.get(userId);
+    if (!member) { try { member = await guild.members.fetch(userId); } catch { member = null; } }
+    if (!member) continue;
+    if (guild.members.me?.voice?.channelId) return guild; // bot already live here
+    if (!mutual) mutual = guild;
+  }
+  return mutual;
+}
+async function runDmMusicCommand(msg, guild, cmd, parts) {
+  const state = getGuildState(guild);
+  const userVC = guild.members.me?.voice?.channelId || getSavedMusicVoice(guild.id) || null;
+  const botChannel = await resolveBotTextChannel(guild, null);
+  const textChannelId = botChannel?.id || null;
+  const reply = (payload) => msg.reply(payload);
+
+  if (cmd === "panel") {
+    const panel = state.current ? buildNowPlayingEmbed(state, state.currentLyrics) : buildPanelEmbed(guild);
+    const ref = await upsertNpMessage(guild, textChannelId, panel, true);
+    if (!ref) return reply({ embeds: [errorEmbed("I cannot access the #bocchi control channel.")] });
+    if (state.current) startNowPlayingTicker(guild, state);
+    return reply({ content: `Music controls are in <#${ref.channelId}> (server **${guild.name}**).` });
+  }
+  if (cmd === "np") {
+    if (!state.current) return reply({ embeds: [infoEmbed("🎵 Nothing playing", `Use \`${BOT_PREFIX}play <song>\` to start`)] });
+    const lyrNp = await fetchLyrics(state.current.title).catch(() => null);
+    return reply({ embeds: [buildNowPlayingEmbed(state, lyrNp)] });
+  }
+  if (cmd === "queue") {
+    if (!state.queue.length) return reply({ embeds: [infoEmbed("📭 Queue is empty", `Use \`${BOT_PREFIX}play <song>\` to add songs`)] });
+    const lines = state.queue.slice(0, 10).map((x, i) => `\`${String(i + 1).padStart(2, "0")}.\` **${x.title}**\n　　👤 ${x.requestedBy}`).join("\n");
+    const more = state.queue.length > 10 ? `\n*… and **${state.queue.length - 10}** tracks*` : "";
+    return reply({
+      embeds: [
+        makeEmbed(COLORS.queue).setDescription(`### 📋 Queue — ${guild.name}`)
+          .addFields(
+            { name: `Tracks (${Math.min(state.queue.length, 10)}/${state.queue.length})`, value: lines + more, inline: false },
+            { name: "🔁 Loop", value: loopLabel(state.loopMode), inline: true },
+            { name: "🎵 Now playing", value: state.current ? `**${state.current.title}**` : "—", inline: true },
+          )
+      ]
+    });
+  }
+  if (cmd === "play") {
+    const q = parts.join(" ").trim();
+    if (!q) return reply({ embeds: [errorEmbed(`Please give a song name or link\n**Example:** \`${BOT_PREFIX}play lofi hip hop\``)] });
+    if (!userVC) return reply({ embeds: [errorEmbed(`I'm not in a voice room in **${guild.name}** yet — run \`${BOT_PREFIX}setup\` in the server first.`)] });
+    const item = { title: q, source: q, requestedBy: msg.author.tag, guild, voiceChannelId: userVC, textChannelId };
+    state.queue.push(item);
+    const shouldStart = !state.current;
+    const metaP = resolveTitleAndThumb(q);
+    if (shouldStart) playNext(guild, textChannelId, state);
+    const meta = await metaP;
+    if (meta.title && meta.title !== q) item.title = meta.title;
+    if (meta.thumb) item.thumb = meta.thumb;
+    if (meta.durationSec) item.durationSec = meta.durationSec;
+    const addedEmbed = makeEmbed(COLORS.success).setDescription(`### ➕ Added to queue`)
+      .addFields(
+        { name: "🎵 Track", value: `**${cleanTitle(item.title)}**`, inline: false },
+        { name: "📋 Queue position", value: `\`#${state.queue.length}\``, inline: true },
+        { name: "👤 Requested by", value: `${msg.author}`, inline: true },
+        { name: "🏠 Server", value: guild.name, inline: true },
+      );
+    if (item.thumb) addedEmbed.setThumbnail(item.thumb);
+    return reply({ embeds: [addedEmbed] });
+  }
+  if (cmd === "playlist") {
+    const parsed = parseLimitFromArgs(parts);
+    const q = parsed.tokens.join(" ").trim();
+    if (!q) return reply({ embeds: [errorEmbed(`Please give a playlist link or search text\n**Example:** \`${BOT_PREFIX}playlist lofi playlist --limit 20\``)] });
+    if (!userVC) return reply({ embeds: [errorEmbed(`I'm not in a voice room in **${guild.name}** yet — run \`${BOT_PREFIX}setup\` in the server first.`)] });
+    const items = await fetchPlaylistEntries(q, parsed.limit);
+    if (!items.length) return reply({ embeds: [errorEmbed("No songs found in the playlist or search results")] });
+    for (const { title, url, thumb, durationSec } of items) {
+      state.queue.push({ title, source: url, thumb: thumb || thumbFor(url), durationSec: durationSec || null, requestedBy: msg.author.tag, guild, voiceChannelId: userVC, textChannelId });
+    }
+    const preview = items.slice(0, 5).map((x, i) => `\`${i + 1}.\` ${x.title}`).join("\n");
+    const more = items.length > 5 ? `\n*… and ${items.length - 5} tracks*` : "";
+    await reply({
+      embeds: [
+        makeEmbed(COLORS.queue).setDescription(`### 📚 Playlist loaded — ${guild.name}`)
+          .addFields(
+            { name: "🎶 Total tracks", value: `**${items.length} tracks**`, inline: true },
+            { name: "👤 Requested by", value: `${msg.author}`, inline: true },
+            { name: "📋 First tracks", value: preview + more, inline: false },
+          )
+      ]
+    });
+    if (!state.current) playNext(guild, textChannelId, state);
+    return;
+  }
+  if (cmd === "skip") {
+    if (!state.current) return reply({ embeds: [infoEmbed(" Nothing playing", "Nothing to skip")] });
+    state.skipRequested = true;
+    state.player.stop(true);
+    cleanupCurrentPipeline(state);
+    return reply({ embeds: [successEmbed("⏭️ Skipped", state.queue.length ? `Next: **${state.queue[0]?.title || "—"}**` : "Queue is empty")] });
+  }
+  if (cmd === "stop") {
+    state.queue = [];
+    state.current = null;
+    state.startedAt = null;
+    state.loopMode = "off";
+    state.skipRequested = false;
+    if (state.leaveTimer) { clearTimeout(state.leaveTimer); state.leaveTimer = null; }
+    state.player.stop(true);
+    cleanupCurrentPipeline(state);
+    const vc = getVoiceConnection(guild.id);
+    if (vc) vc.destroy();
+    markNpStopped(guild).catch(() => { });
+    return reply({ embeds: [successEmbed("🛑 Stopped", "Queue cleared and left voice")] });
+  }
+  if (cmd === "pause") { state.player.pause(); return reply({ embeds: [infoEmbed("⏸️ Paused", `Type \`${BOT_PREFIX}resume\` to resume`)] }); }
+  if (cmd === "resume") { state.player.unpause(); return reply({ embeds: [successEmbed("▶️ Resumed", `Now playing: **${state.current?.title || "—"}**`)] }); }
+  if (cmd === "volume") {
+    const value = parseInt(parts[0], 10);
+    if (Number.isNaN(value)) return reply({ embeds: [errorEmbed(`Please give a volume number (0-10000)\n**Example:** \`${BOT_PREFIX}volume 80\``)] });
+    setVolumePct(state, value);
+    const bar = "█".repeat(Math.round(Math.min(state.volumePct, 200) / 20)) + "░".repeat(10 - Math.round(Math.min(state.volumePct, 200) / 20));
+    return reply({ embeds: [successEmbed("🔊  Volume updated", `\`${bar}\` **${state.volumePct}%**`)] });
+  }
+  if (cmd === "loop") {
+    const mode = (parts[0] || "").toLowerCase();
+    if (!["off", "track", "queue"].includes(mode)) return reply({ embeds: [errorEmbed("Mode must be `off` · `track` · `queue`")] });
+    state.loopMode = mode;
+    return reply({ embeds: [successEmbed("🔁 Loop updated", `Current mode: **${loopLabel(mode)}**`)] });
+  }
+  if (cmd === "shuffle") {
+    shuffleArray(state.queue);
+    return reply({ embeds: [successEmbed("🔀 Shuffled", `Reordered **${state.queue.length} tracks** done`)] });
+  }
+  if (cmd === "remove") {
+    const index = parseInt(parts[0], 10);
+    if (Number.isNaN(index) || index < 1) return reply({ embeds: [errorEmbed(`Please give the queue number to remove\n**Example:** \`${BOT_PREFIX}remove 3\``)] });
+    if (index > state.queue.length) return reply({ embeds: [errorEmbed(`Number is past the queue end (${state.queue.length} tracks)`)] });
+    const [rm] = state.queue.splice(index - 1, 1);
+    return reply({ embeds: [successEmbed("🗑️  Removed from queue", `**${rm?.title || "Unknown"}**`)] });
+  }
+  return reply({ embeds: [errorEmbed(`\`${cmd}\` is not available in private chat`)] });
+}
+async function handleDmMessage(msg) {
+  const raw = String(msg.content || "").trim();
+  if (!raw) return;
+  const looksLikeCommand = raw.startsWith(BOT_PREFIX) || raw.startsWith("/");
+  const stripped = raw.startsWith(BOT_PREFIX) ? raw.slice(BOT_PREFIX.length).trim()
+    : raw.startsWith("/") ? raw.slice(1).trim() : raw;
+  const parts = stripped.split(/\s+/).filter(Boolean);
+  const cmdRaw = (parts.shift() || "").toLowerCase();
+  const cmd = DM_COMMAND_ALIASES[cmdRaw] || cmdRaw;
+  const known = cmd === "help" || cmd === "ping" || DM_MUSIC_COMMANDS.has(cmd) || DM_BLOCKED_COMMANDS.has(cmd);
+
+  if (stripped && (looksLikeCommand || known)) {
+    if (DM_BLOCKED_COMMANDS.has(cmd)) {
+      return msg.reply({ embeds: [errorEmbed(`🔒 \`${BOT_PREFIX}${cmd}\` is filtered out of private chat — it is a server/admin command. Use it in the server's #bocchi room.`)] });
+    }
+    if (cmd === "help") return msg.reply({ embeds: [buildHelpEmbedPrefix()] });
+    if (cmd === "ping") {
+      return msg.reply({
+        embeds: [makeEmbed(COLORS.info).setDescription("### 🏓  Pong!").addFields({ name: "🌐 WebSocket", value: `\`${Math.round(client.ws.ping)} ms\``, inline: true })]
+      });
+    }
+    if (DM_MUSIC_COMMANDS.has(cmd)) {
+      const guild = await dmTargetGuild(msg.author.id);
+      if (!guild) return msg.reply({ embeds: [errorEmbed("I don't share any server with you yet — invite me and run `/setup` there first.")] });
+      return runDmMusicCommand(msg, guild, cmd, parts);
+    }
+    if (looksLikeCommand) {
+      return msg.reply({ embeds: [errorEmbed(`Unknown command \`${raw.split(/\s+/)[0]}\` — type \`help\` to see what I can do`)] });
+    }
+  }
+
+  // Plain conversation — the bot answers everything typed in private chat.
+  if (config.geminiApiKey || config.openRouterApiKey) {
+    const sessionKey = `dm:${msg.author.id}`;
+    if (aiChatBusy.has(sessionKey)) {
+      return msg.reply({ content: "I’m finishing my last answer — one moment!", allowedMentions: { parse: [] } });
+    }
+    aiChatBusy.add(sessionKey);
+    try {
+      await msg.channel.sendTyping();
+      const answer = await askGeminiWithHistory(raw, sessionKey);
+      return msg.reply({ content: answer, allowedMentions: { parse: [] } });
+    } catch (e) {
+      logPretty("WARN", `DM chat reply failed: ${e?.message || e}`);
+    } finally { aiChatBusy.delete(sessionKey); }
+  }
+  return msg.reply({
+    embeds: [
+      infoEmbed("🎸 Bocchi here!",
+        "I answer everything you type in private chat.\n" +
+        `**Safe commands here:** \`help\` \`play <song>\` \`playlist\` \`np\` \`queue\` \`skip\` \`pause\` \`resume\` \`stop\` \`loop\` \`volume\` \`shuffle\` \`remove\` \`panel\` \`ping\`\n` +
+        "**Filtered out (server/admin only):** `setup` `ytsignin` `ytsignout` `botupdate` `setai` `clear` `deletep` `vstate` `video` `watchtogether`\n" +
+        "Anything else — just talk to me!")
+    ]
+  });
+}
+
 client.on("messageCreate", async (msg) => {
   try {
-    if (!msg.guild) return;
     if (msg.author?.bot) return;
+    if (!msg.guild) {
+      await handleDmMessage(msg);
+      return;
+    }
 
     const privateSession = privateAiSessions.get(msg.channelId);
     if (privateSession) {
@@ -1378,7 +1757,7 @@ client.on("messageCreate", async (msg) => {
       guild: msg.guild.name,
     });
 
-    const allowed = new Set(["help", "play", "playlist", "skip", "stop", "pause", "resume", "queue", "np", "remove", "shuffle", "loop", "volume", "ping", "botupdate", "panel", "ytstatus", "ytsignin", "ytsignout", "video", "watchtogether", "vstate"]);
+    const allowed = new Set(["help", "play", "playlist", "skip", "stop", "pause", "resume", "queue", "np", "remove", "shuffle", "loop", "volume", "ping", "botupdate", "panel", "setup", "ytstatus", "ytsignin", "ytsignout", "video", "watchtogether", "vstate"]);
     if (!allowed.has(cmd)) {
       return msg.reply({
         embeds: [
@@ -1390,6 +1769,14 @@ client.on("messageCreate", async (msg) => {
 
     if (cmd === "help") {
       return msg.reply({ embeds: [buildHelpEmbedPrefix()] });
+    }
+
+    if (cmd === "setup") {
+      if (!isGuildAdmin(msg.member)) return msg.reply({ embeds: [errorEmbed("Manage Server permission required")] });
+      try {
+        const { voiceRoom, channel } = await runBocchiSetup(msg.guild);
+        return msg.reply({ content: `Done! Joined <#${voiceRoom.id}> (saved as the music room) and posted controls in <#${channel.id}>.` });
+      } catch (e) { return msg.reply({ embeds: [errorEmbed("Could not set up the bocchi room: " + (e?.message || e))] }); }
     }
 
     // Prepare option values similar to slash
@@ -1422,7 +1809,7 @@ client.on("messageCreate", async (msg) => {
     const userVC = msg.member?.voice?.channelId;
     const botVC = me?.voice?.channelId;
     const sameVC = userVC && (!botVC || botVC === userVC);
-    const needsSameVC = !["help", "ping", "botupdate", "np", "queue", "panel", "ytstatus", "ytsignin", "ytsignout", "watchtogether", "vstate"].includes(cmd);
+    const needsSameVC = !["help", "ping", "botupdate", "np", "queue", "panel", "setup", "ytstatus", "ytsignin", "ytsignout", "watchtogether", "vstate"].includes(cmd);
     if (needsSameVC && !sameVC) {
       return msg.reply({ embeds: [errorEmbed("Please join the bot's voice channel first 🎙️")] });
     }
@@ -1466,15 +1853,11 @@ client.on("messageCreate", async (msg) => {
     }
 
     if (cmd === "panel") {
-      const controlChannelId = getSavedControlChannel(msg.guild.id);
-      if (controlChannelId) {
-        const panel = state.current ? buildNowPlayingEmbed(state, state.currentLyrics) : buildPanelEmbed(msg.guild);
-        const ref = await upsertNpMessage(msg.guild, controlChannelId, panel, true);
-        if (!ref) return msg.reply({ embeds: [errorEmbed("I cannot access the configured music control channel.")] });
-        if (state.current) startNowPlayingTicker(msg.guild, state);
-        return msg.reply({ content: `Music controls are in <#${controlChannelId}>.` });
-      }
-      return msg.reply({ embeds: [buildPanelEmbed(msg.guild)], components: buildControlRows(state) });
+      const panel = state.current ? buildNowPlayingEmbed(state, state.currentLyrics) : buildPanelEmbed(msg.guild);
+      const ref = await upsertNpMessage(msg.guild, null, panel, true);
+      if (!ref) return msg.reply({ embeds: [errorEmbed("I cannot access the #bocchi control channel.")] });
+      if (state.current) startNowPlayingTicker(msg.guild, state);
+      return msg.reply({ content: `Music controls are in <#${ref.channelId}>.` });
     }
 
     if (cmd === "ytstatus") {
@@ -1705,6 +2088,7 @@ const commands = [
   new SlashCommandBuilder().setName("botupdate").setDescription("Update yt-dlp"),
   new SlashCommandBuilder().setName("np").setDescription("What's playing right now"),
   new SlashCommandBuilder().setName("queue").setDescription("Show the remaining queue"),
+  new SlashCommandBuilder().setName("list").setDescription("Show the remaining queue"),
   new SlashCommandBuilder().setName("volume").setDescription("Adjust volume (0-10000)")
     .addIntegerOption(o => o.setName("value").setDescription("Percent (0-10000)").setRequired(true).setMinValue(0).setMaxValue(10000)),
   new SlashCommandBuilder().setName("playlist").setDescription("Add songs in bulk from YouTube (playlist or search)")
@@ -1740,7 +2124,7 @@ const commands = [
   new SlashCommandBuilder().setName("clear").setDescription("Clear this server's AI history and private chats")
     .setDefaultMemberPermissions(PermissionFlagsBits.ManageChannels),
   new SlashCommandBuilder().setName("panel").setDescription("Open the music control panel (buttons)"),
-  new SlashCommandBuilder().setName("setup").setDescription("Create or reuse the #bocchi music room")
+  new SlashCommandBuilder().setName("setup").setDescription("Create or reuse the music control room")
     .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild),
   new SlashCommandBuilder().setName("ytstatus").setDescription("Check YouTube sign-in status"),
   new SlashCommandBuilder().setName("ytsignin").setDescription("Sign in YouTube with cookies.txt (admin)")
@@ -1802,6 +2186,32 @@ function setSavedVolume(guildId, pct) {
 function getSavedSpeed(guildId) {
   const v = loadGuildSettings()[String(guildId)]?.speed;
   return Number.isFinite(v) && v >= 0.5 && v <= 2 ? v : 1;
+}
+function getSavedShowLyrics(guildId) {
+  const v = loadGuildSettings()[String(guildId)]?.showLyrics;
+  return v === undefined ? true : v !== false;
+}
+function setSavedShowLyrics(guildId, on) {
+  const all = loadGuildSettings();
+  all[String(guildId)] = { ...(all[String(guildId)] || {}), showLyrics: on !== false };
+  saveGuildSettings(all);
+}
+function getSavedShowControls(guildId) {
+  const v = loadGuildSettings()[String(guildId)]?.showControls;
+  return v === undefined ? true : v !== false;
+}
+function setSavedShowControls(guildId, on) {
+  const all = loadGuildSettings();
+  all[String(guildId)] = { ...(all[String(guildId)] || {}), showControls: on !== false };
+  saveGuildSettings(all);
+}
+function getSavedMusicVoice(guildId) {
+  return loadGuildSettings()[String(guildId)]?.musicVoiceChannelId || null;
+}
+function setSavedMusicVoice(guildId, channelId) {
+  const all = loadGuildSettings();
+  all[String(guildId)] = { ...(all[String(guildId)] || {}), musicVoiceChannelId: channelId };
+  saveGuildSettings(all);
 }
 function setSavedSpeed(guildId, speed) {
   const all = loadGuildSettings();
@@ -1884,6 +2294,8 @@ function createGuildState(guild) {
     currentResource: null,
     volumePct: getSavedVolume(guild.id) ?? config.defaultVolume,
     speed: getSavedSpeed(guild.id), // playback speed multiplier (1 or 2)
+    showLyrics: getSavedShowLyrics(guild.id), // karaoke sing-along block
+    showControls: getSavedShowControls(guild.id), // transport buttons on the panel
     loopMode: config.defaultLoop,
     skipRequested: false,
     leaveTimer: null, // disconnect countdown while waiting for new songs
@@ -1894,7 +2306,6 @@ function createGuildState(guild) {
     npRefreshTimer: null,
     npRefreshing: false,
     currentLyrics: null,
-    showAdvancedControls: false,
     gen: 0, // playback generation: stale async flows abort when superseded
     failStreak: 0, // consecutive hard failures for the same title
     lastFailTitle: null,
@@ -1952,8 +2363,8 @@ async function markNpStopped(guild, text) {
 // Utility functions
 async function sendToTextChannel(guild, textChannelId, content) {
   try {
-    const ch = guild.channels.cache.get(textChannelId);
-    if (ch && ch.isTextBased?.()) return ch.send(content);
+    const ch = await resolveBotTextChannel(guild, textChannelId);
+    if (ch) return ch.send(content);
   } catch { }
 }
 function ensureVC(guild, channelId, state, opts = {}) {
@@ -2600,6 +3011,25 @@ async function fetchPlaylistEntries(input, limit = null) {
 }
 
 // Player helper functions
+// Playback-finished jingle: played in the voice room when a song/playlist
+// naturally ends (Assets/Bocchi-…-再生完了曲.mp3).
+const END_CHIME_PATH = path.join(__dirname, "Assets", "Bocchi-2026-09-29-00-31-再生完了曲.mp3");
+async function playEndChime(guild, state) {
+  try {
+    if (state.current || state.queue.length) return; // something took over
+    if (!fs.existsSync(END_CHIME_PATH)) return;
+    const conn = getVoiceConnection(guild.id);
+    if (!conn || conn.state.status === VoiceConnectionStatus.Destroyed) return;
+    logPretty("INFO", `Queue finished — playing end jingle in ${guild.name}`);
+    const resource = createAudioResource(END_CHIME_PATH, { inlineVolume: false });
+    await new Promise((resolve) => {
+      const finish = () => { clearTimeout(timer); state.player.off("idle", finish); resolve(); };
+      const timer = setTimeout(finish, 20000);
+      state.player.once("idle", finish);
+      try { state.player.play(resource); } catch { finish(); }
+    });
+  } catch (e) { logPretty("WARN", `End jingle failed: ${e?.message || e}`); }
+}
 async function handlePlayerIdle(guild, state) {
   stopNowPlayingTicker(state);
   cleanupCurrentPipeline(state);
@@ -2633,12 +3063,10 @@ async function handlePlayerIdle(guild, state) {
     state.loopMode = "off";
     state.quickFails = 0;
     logPretty("ERROR", `Giving up loop on "${finished.title}" (died 3x in a row)`);
-    await sendToTextChannel(guild, finished.textChannelId, {
-      embeds: [
-        makeEmbed(COLORS.warning)
-          .setDescription(`### ⛔  Stopped looping\n**${cleanTitle(finished.title)}** keeps failing — loop is off. Check \`/ytstatus\` or re-upload cookies with \`/ytsignin\`.`)
-      ]
-    });
+    await sendToTextChannel(guild, finished.textChannelId, { embeds: [
+      makeEmbed(COLORS.warning)
+        .setDescription(`### ⛔  Stopped looping\n**${cleanTitle(finished.title)}** keeps failing — loop is off. Check \`/ytstatus\` or re-upload cookies with \`/ytsignin\`.`)
+    ]});
     state.current = null;
     await playNext(guild, finished.textChannelId, state);
     return;
@@ -2656,6 +3084,7 @@ async function handlePlayerIdle(guild, state) {
 
   state.current = null;
   await playNext(guild, finished.textChannelId, state);
+  if (!manualSkip && !state.queue.length && !state.current) await playEndChime(guild, state);
 }
 
 async function handlePlayerError(error, guild, state) {
@@ -2736,15 +3165,17 @@ async function playNext(guild, textChannelId, state = getGuildState(guild)) {
   try {
     // Lyrics resolve in parallel with audio extraction — no added delay.
     const lyrP = fetchLyrics(next.title).catch(() => null);
-    // Use unified playback helper; this will throw on resolution errors
-    const { pageUrl } = await startPlayback(guild, next, state);
+    // Use unified playback helper; this will throw on resolution errors.
+    // stayPut: automatic queue advances never move rooms. Fresh /play-style
+    // requests already validated same-room-or-no-connection, so staying is safe.
+    const { pageUrl } = await startPlayback(guild, next, state, true);
     if (stale()) return; // a newer playback took over — don't touch state
     state.startedAt = Date.now();
     state.pausedAt = null;
     state.lastStart = { title: next.title, t: Date.now() };
     state.failStreak = 0;
     logPretty("NOWPLAY", `${next.title}`, {
-      user: next.requestedBy,
+      user:  next.requestedBy,
       tail: `up_next: ${state.queue[0]?.title || "—"}`,
     });
     const lyrics = await lyrP;
@@ -2755,7 +3186,7 @@ async function playNext(guild, textChannelId, state = getGuildState(guild)) {
     startNowPlayingTicker(guild, state);
   } catch (e) {
     if (stale()) { // put the song back — the newer flow owns the queue now
-      try { if (state.current !== next && next) state.queue.unshift(next); } catch { }
+      try { if (state.current !== next && next) state.queue.unshift(next); } catch {}
       return;
     }
     const reason = String(e?.message || e || "unknown").slice(0, 300);
@@ -2766,12 +3197,10 @@ async function playNext(guild, textChannelId, state = getGuildState(guild)) {
       state.current = null;
       state.queue.unshift(next);
       logPretty("WARN", `Retrying "${next.title}" with player-client=${next.altClient} (no cookies needed?)`);
-      await sendToTextChannel(guild, next.textChannelId, {
-        embeds: [
-          makeEmbed(COLORS.info)
-            .setDescription(`### 🔄  Trying another way\n**${cleanTitle(next.title)}** needs sign-in on this client — retrying without cookies…`)
-        ]
-      });
+      await sendToTextChannel(guild, next.textChannelId, { embeds: [
+        makeEmbed(COLORS.info)
+          .setDescription(`### 🔄  Trying another way\n**${cleanTitle(next.title)}** needs sign-in on this client — retrying without cookies…`)
+      ]});
       await playNext(guild, textChannelId, state);
       return;
     }
@@ -2784,12 +3213,10 @@ async function playNext(guild, textChannelId, state = getGuildState(guild)) {
     logPretty("ERROR", "play error: " + reason);
     if ((state.failStreak || 0) >= 3) {
       logPretty("ERROR", `Giving up on "${next?.title}" after 3 straight failures`);
-      await sendToTextChannel(guild, next.textChannelId, {
-        embeds: [
-          makeEmbed(COLORS.error)
-            .setDescription(`### ⛔  Giving up\n**${cleanTitle(next?.title)}** failed 3 times in a row — removed from rotation.`)
-        ]
-      });
+      await sendToTextChannel(guild, next.textChannelId, { embeds: [
+        makeEmbed(COLORS.error)
+          .setDescription(`### ⛔  Giving up\n**${cleanTitle(next?.title)}** failed 3 times in a row — removed from rotation.`)
+      ]});
       if (state.loopMode === "track") state.loopMode = "off";
       state.failStreak = 0;
       state.current = null;
@@ -3048,11 +3475,9 @@ client.on("interactionCreate", async (itx) => {
       } else {
         setAiPersona(aiSessionKeyForChannel(itx.guildId, itx.channelId), persona);
       }
-      return itx.editReply({
-        content: reset
-          ? "Reset this chat to Gemini's default personality. Other chats are unchanged."
-          : `Applied this persona to the current chat only (${persona.length} characters). Other chats are unchanged.`
-      });
+      return itx.editReply({ content: reset
+        ? "Reset this chat to Gemini's default personality. Other chats are unchanged."
+        : `Applied this persona to the current chat only (${persona.length} characters). Other chats are unchanged.` });
     } catch (error) {
       return itx.editReply({ content: `Could not set this chat's persona: ${error?.message || error}` });
     }
@@ -3162,34 +3587,8 @@ client.on("interactionCreate", async (itx) => {
     }
     await itx.deferReply({ flags: MessageFlags.Ephemeral });
     try {
-      const savedChannelId = getSavedControlChannel(itx.guildId);
-      let channel = savedChannelId ? await itx.guild.channels.fetch(savedChannelId).catch(() => null) : null;
-      if (!channel?.isTextBased?.()) {
-        channel = itx.guild.channels.cache.find((candidate) =>
-          candidate.type === ChannelType.GuildText && ["bocchi", "music-control"].includes(candidate.name));
-      }
-      if (!channel) {
-        channel = await itx.guild.channels.create({
-          name: "bocchi",
-          type: ChannelType.GuildText,
-          topic: "Bocchi music controls and live lyrics.",
-          permissionOverwrites: [{
-            id: itx.guild.roles.everyone.id,
-            allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.ReadMessageHistory],
-          }],
-          reason: "Create the music control room",
-        });
-      }
-      if (channel.name !== "bocchi") await channel.setName("bocchi", "Rename music control room to Bocchi");
-      const state = getGuildState(itx.guild);
-      const panel = state.current
-        ? buildNowPlayingEmbed(state, state.currentLyrics)
-        : buildPanelEmbed(itx.guild);
-      const ref = await upsertNpMessage(itx.guild, channel.id, panel, true);
-      if (!ref) throw new Error("I could not send the panel there. Check View Channel, Send Messages, and Embed Links permissions.");
-      setSavedControlChannel(itx.guildId, channel.id);
-      if (state.current) startNowPlayingTicker(itx.guild, state);
-      return itx.editReply({ content: `Bocchi music controls are set up in <#${channel.id}>.` });
+      const { voiceRoom, channel } = await runBocchiSetup(itx.guild);
+      return itx.editReply({ content: `Done! Joined <#${voiceRoom.id}> (saved as the music room) and posted controls in <#${channel.id}>.` });
     } catch (error) {
       return itx.editReply({ content: `Could not set up the music control channel: ${error?.message || error}` });
     }
@@ -3237,15 +3636,11 @@ client.on("interactionCreate", async (itx) => {
   }
 
   if (itx.commandName === "panel") {
-    const controlChannelId = getSavedControlChannel(itx.guildId);
-    if (controlChannelId) {
-      const panel = state.current ? buildNowPlayingEmbed(state, state.currentLyrics) : buildPanelEmbed(itx.guild);
-      const ref = await upsertNpMessage(itx.guild, controlChannelId, panel, true);
-      if (!ref) return itx.reply({ content: "I cannot access the configured music control channel.", flags: MessageFlags.Ephemeral });
-      if (state.current) startNowPlayingTicker(itx.guild, state);
-      return itx.reply({ content: `Music controls are in <#${controlChannelId}>.`, flags: MessageFlags.Ephemeral });
-    }
-    return itx.reply({ embeds: [buildPanelEmbed(itx.guild)], components: buildControlRows(state) });
+    const panel = state.current ? buildNowPlayingEmbed(state, state.currentLyrics) : buildPanelEmbed(itx.guild);
+    const ref = await upsertNpMessage(itx.guild, null, panel, true);
+    if (!ref) return itx.reply({ content: "I cannot access the #bocchi control channel.", flags: MessageFlags.Ephemeral });
+    if (state.current) startNowPlayingTicker(itx.guild, state);
+    return itx.reply({ content: `Music controls are in <#${ref.channelId}>.`, flags: MessageFlags.Ephemeral });
   }
 
   if (itx.commandName === "ytstatus") {
@@ -3325,7 +3720,7 @@ client.on("interactionCreate", async (itx) => {
   }
 
   if (itx.commandName === "play") {
-    await itx.deferReply();
+    await itx.deferReply({ flags: MessageFlags.Ephemeral });
     const q = itx.options.getString("query");
     // Queue instantly with the query as placeholder title, then resolve the
     // real title AND start playback in parallel (was: 2 sequential yt-dlp
@@ -3400,8 +3795,8 @@ client.on("interactionCreate", async (itx) => {
     return itx.reply({ embeds: [buildNowPlayingEmbed(state, lyrNpS)], components: buildControlRows(state) });
   }
 
-  if (itx.commandName === "queue") {
-    if (!state.queue.length) return itx.reply({ embeds: [infoEmbed("📭 Queue is empty", "Use `/play query:<song>` to add songs")] });
+  if (itx.commandName === "queue" || itx.commandName === "list") {
+    if (!state.queue.length) return itx.reply({ embeds: [infoEmbed("📭 Queue is empty", "Use `/play query:<song>` to add songs")], flags: MessageFlags.Ephemeral });
     const lines = state.queue.slice(0, 10).map((x, i) => `\`${String(i + 1).padStart(2, "0")}.\` **${x.title}**\n　　👤 ${x.requestedBy}`).join("\n");
     const more = state.queue.length > 10 ? `\n*… and **${state.queue.length - 10}** tracks*` : "";
     return itx.reply({
@@ -3413,7 +3808,8 @@ client.on("interactionCreate", async (itx) => {
             { name: "🔁 Loop", value: loopLabel(state.loopMode), inline: true },
             { name: "🎵 Now playing", value: state.current ? `**${state.current.title}**` : "—", inline: true },
           )
-      ]
+      ],
+      flags: MessageFlags.Ephemeral
     });
   }
 
@@ -3487,7 +3883,7 @@ client.on("interactionCreate", async (itx) => {
   if (itx.commandName === "loop") {
     const mode = itx.options.getString("mode");
     state.loopMode = mode;
-    return itx.reply({ embeds: [successEmbed("🔁 Loop updated", `Current mode: **${loopLabel(mode)}**`)] });
+    return itx.reply({ embeds: [successEmbed("🔁 Loop updated", `Current mode: **${loopLabel(mode)}**`)], flags: MessageFlags.Ephemeral });
   }
 });
 
@@ -3625,7 +4021,7 @@ function dashGuilds() {
         id, name: g.name,
         botVC: g.members.me?.voice?.channelId || null,
         voice,
-        nowPlaying: st?.current ? { title: st.current.title, by: st.current.requestedBy, thumb: st.current.thumb || thumbFor(st.current.source), durationSec: st.current.durationSec || null, startedAt: st.startedAt || null, posBase: st.posBase || 0, speed: st.speed || 1 } : null,
+        nowPlaying: st?.current ? { title: st.current.title, by: st.current.requestedBy, thumb: st.current.thumb || thumbFor(st.current.source), durationSec: st.current.durationSec || null, startedAt: st.startedAt || null, posBase: st.posBase || 0, speed: st.speed || 1, lyrics: st.currentLyrics } : null,
         queue: st ? st.queue.slice(0, 20).map((x) => ({ title: x.title, by: x.requestedBy })) : [],
         queueCount: st?.queue.length || 0,
         volume: st?.volumePct ?? config.defaultVolume,
@@ -3711,7 +4107,7 @@ function dashControl(guildId, action, value) {
     const s = Number(value);
     if (![1, 2].includes(s)) throw new Error("speed must be 1 or 2");
     state.speed = s;
-    try { if (state.guildId) setSavedSpeed(state.guildId, s); } catch { }
+    try { if (state.guildId) setSavedSpeed(state.guildId, s); } catch {}
     if (state.current) playSame(guild, state.current.textChannelId, state.current, state).catch((e) => logPretty("ERROR", "web speed restart: " + (e?.message || e)));
     return String(s);
   }
@@ -3726,7 +4122,7 @@ function dashControl(guildId, action, value) {
     state.queue.unshift({ title: prev.title, source: prev.source, thumb: prev.thumb || null, durationSec: prev.durationSec || null, requestedBy: prev.requestedBy || ("dashboard:" + config.dashboardUser), guild, voiceChannelId: uvc, textChannelId: firstTextChannelId(guild) });
     state.skipRequested = true;
     state.prevJump = true;
-    try { state.player.stop(true); } catch { }
+    try { state.player.stop(true); } catch {}
     cleanupCurrentPipeline(state);
     return prev.title;
   }
@@ -4011,85 +4407,87 @@ if(window.AOS)AOS.init({once:true,duration:520,offset:22,disable:window.matchMed
 }
 function dashPlayerPageTailwind() {
   return '<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Bocchi · Web Player</title>'
-    + '<script src="https://cdn.tailwindcss.com"></script><link href="https://unpkg.com/aos@2.3.4/dist/aos.css" rel="stylesheet">'
-    + '<style>body{background-color:#090c10;background-image:linear-gradient(rgba(255,255,255,.025) 1px,transparent 1px),linear-gradient(90deg,rgba(255,255,255,.025) 1px,transparent 1px);background-size:32px 32px}input:focus,select:focus{outline:2px solid #e8b34c;outline-offset:2px}</style></head><body class="min-h-screen text-zinc-100 antialiased">'
-    + '<main class="mx-auto max-w-5xl px-4 py-6 sm:px-6 sm:py-10"><header class="mb-8 flex flex-wrap items-center justify-between gap-4 border-b border-white/10 pb-5" data-aos="fade-down"><div class="flex items-center gap-3"><span class="grid h-10 w-10 place-items-center bg-amber-300 text-xl font-black text-zinc-950">♪</span><div><p class="text-sm font-semibold">Bocchi player</p><p class="font-mono text-[10px] text-zinc-500">LISTENING ROOM</p></div></div><div class="flex flex-wrap items-center gap-2"><a class="px-3 py-2 text-xs text-zinc-400 hover:text-amber-200" href="/dashboard">← Control desk</a><select id="srv" class="border border-white/10 bg-[#10151b] px-3 py-2 text-sm"></select><select id="chn" class="border border-white/10 bg-[#10151b] px-3 py-2 text-sm"></select><button class="border border-white/15 px-3 py-2 text-xs hover:border-amber-300" onclick="P.join()">Join voice</button><button class="border border-white/15 px-3 py-2 text-xs hover:border-rose-300" onclick="P.leave()">Leave</button></div></header>'
-    + '<section class="grid gap-6 lg:grid-cols-[minmax(0,1.2fr)_minmax(280px,.8fr)]" data-aos="fade-up"><div class="border border-white/10 bg-[#10151b] p-4 sm:p-6"><img id="cover" class="mb-5 hidden aspect-video w-full border border-white/10 object-cover" alt="Album art"><p class="font-mono text-[10px] uppercase text-amber-300">Now playing</p><h1 id="ttl" class="mt-2 break-words text-2xl font-semibold sm:text-3xl">— idle —</h1><p id="by" class="mt-2 text-sm text-zinc-400"></p>'
-    + '<div class="mt-8"><input id="seekbar" class="w-full cursor-pointer accent-amber-300 disabled:cursor-not-allowed disabled:opacity-40" type="range" min="0" max="1000" step="1" value="0" aria-label="Seek within track" onchange="P.seek(this.value)"><div id="times" class="mt-1 flex justify-between font-mono text-xs text-zinc-500"><span id="tcur">0:00</span><span id="ttot">• LIVE</span></div></div>'
-    + '<div class="mt-6 flex flex-wrap items-center gap-2"><button class="h-11 w-12 border border-white/10 text-lg hover:border-amber-300" onclick="P.ctl(\'prev\')" title="Previous">⏮</button><button id="pp" class="h-11 w-12 bg-amber-300 text-lg text-zinc-950 hover:bg-amber-200" onclick="P.toggle()" title="Play or pause">▶</button><button class="h-11 w-12 border border-white/10 text-lg hover:border-amber-300" onclick="P.ctl(\'skip\')" title="Skip">⏭</button><button class="h-11 w-12 border border-rose-400/30 text-lg text-rose-300 hover:bg-rose-400/10" onclick="P.ctl(\'stop\')" title="Stop">■</button><button id="loopb" class="ml-auto border border-white/10 px-3 py-3 text-xs hover:border-amber-300" onclick="P.loop()">Loop · Off</button><button id="spdb" class="border border-white/10 px-3 py-3 text-xs hover:border-amber-300" onclick="P.speed()">1×</button></div>'
-    + '<div class="mt-5 flex flex-wrap items-center gap-3 border-t border-white/5 pt-5"><label class="font-mono text-xs text-zinc-500" for="vol">VOLUME</label><input id="vol" class="min-w-32 flex-1 accent-amber-300" type="range" min="0" max="200" value="100"><button class="border border-white/10 px-3 py-2 text-xs hover:border-amber-300" onclick="P.vol()">Apply</button></div><div class="mt-5 flex gap-2"><input id="q2" type="text" placeholder="Search or paste a link" class="min-w-0 flex-1 border border-white/10 bg-[#090c10] px-3 py-3 text-sm placeholder:text-zinc-600"><button class="bg-amber-300 px-4 py-3 text-sm font-semibold text-zinc-950 hover:bg-amber-200" onclick="P.play()">Queue</button></div><p id="msg" class="mt-3 min-h-5 text-xs text-zinc-500"></p></div>'
-    + '<aside class="border border-white/10 bg-[#10151b] p-4 sm:p-6" data-aos="fade-up" data-aos-delay="100"><div class="mb-4 flex items-end justify-between"><div><p class="font-mono text-[10px] uppercase text-zinc-500">Next tracks</p><h2 class="mt-1 text-lg font-semibold">Up next</h2></div><span class="text-amber-300">☷</span></div><ol id="q" class="divide-y divide-white/5 text-sm text-zinc-300"></ol></aside></section></main>'
-    + '<script src="https://unpkg.com/aos@2.3.4/dist/aos.js"></script><script>'
-    + 'var PG={g:[],id:"",snap:null,snapAt:0};'
-    + 'function say(t){document.getElementById("msg").textContent=t;}'
-    + 'function gid(){var s=document.getElementById("srv");return s&&s.value?s.value:"";}'
-    + 'function fmt(s){if(s==null||!isFinite(s)||s<0)return"• LIVE";s=Math.floor(s);var m=Math.floor(s/60);s=s%60;return m+":"+(s<10?"0":"")+s;}'
-    + 'async function api(p,d){var r=await fetch(p,{method:d?"POST":"GET",headers:{"Content-Type":"application/json"},body:d?JSON.stringify(d):undefined});var j=null;try{j=await r.json();}catch(e){}if(!r.ok||(j&&j.error))throw new Error((j&&j.error)||("HTTP "+r.status));return j;}'
-    + 'async function load(){try{var g=await(await fetch("/api/guilds")).json();PG.g=g;var s=document.getElementById("srv");var keep=s.value;s.innerHTML="";g.forEach(function(x){var o=document.createElement("option");o.value=x.id;o.textContent=x.name;if(x.id===keep)o.selected=true;s.appendChild(o);});if(!s.value&&g.length)s.value=g[0].id;chans();refresh();}catch(e){say("load failed: "+e.message);}}'
-    + 'function cur(){var id=gid();for(var i=0;i<PG.g.length;i++)if(PG.g[i].id===id)return PG.g[i];return null;}'
-    + 'function chans(){var g=cur();var c=document.getElementById("chn");c.innerHTML="";if(!g)return;(g.voice||[]).forEach(function(x){var o=document.createElement("option");o.value=x.id;o.textContent=x.name+" · "+x.members;if(g.botVC===x.id)o.selected=true;c.appendChild(o);});}'
-    + 'var P={'
-    + 'join:async function(){try{var j=await api("/api/join",{guildId:gid(),channelId:document.getElementById("chn").value});say("Joined "+j.channel);load();}catch(e){say("Join failed: "+e.message);}},'
-    + 'leave:async function(){try{await api("/api/leave",{guildId:gid()});say("Left voice");load();}catch(e){say(e.message);}},'
-    + 'play:async function(){var q=document.getElementById("q2").value;if(!q){say("Enter a song first.");return;}try{var j=await api("/api/play",{guildId:gid(),query:q});say("Queued: "+j.title);document.getElementById("q2").value="";refresh();}catch(e){say("Queue failed: "+e.message);}},'
-    + 'ctl:async function(a){try{var j=await api("/api/ctl",{guildId:gid(),action:a});say(j.result);refresh();}catch(e){say(e.message);}},'
-    + 'toggle:async function(){var g=cur();var paused=g&&g.player==="paused";try{var j=await api("/api/ctl",{guildId:gid(),action:paused?"resume":"pause"});say(j.result);refresh();}catch(e){say(e.message);}},'
-    + 'loop:async function(){var g=cur();var nx=g&&g.loop==="off"?"track":(g&&g.loop==="track"?"queue":"off");try{await api("/api/loop",{guildId:gid(),mode:nx});refresh();}catch(e){say(e.message);}},'
-    + 'speed:async function(){var g=cur();var speed=(g&&g.nowPlaying&&g.nowPlaying.speed)||1;try{var j=await api("/api/ctl",{guildId:gid(),action:"speed",value:speed===2?1:2});say("Speed "+j.result+"×");refresh();}catch(e){say(e.message);}},'
-    + 'vol:async function(){try{var j=await api("/api/volume",{guildId:gid(),value:Number(document.getElementById("vol").value)});say("Volume "+j.result+"%");refresh();}catch(e){say(e.message);}},'
-    + 'seek:async function(value){var g=cur();if(!g||!g.nowPlaying||!g.nowPlaying.durationSec){say("Live stream cannot be seeked.");return;}var seconds=Math.floor(Math.max(0,Math.min(1000,Number(value)))/1000*g.nowPlaying.durationSec);try{var j=await api("/api/seek",{guildId:gid(),seconds:seconds});say("Seeked to "+fmt(j.position));refresh();}catch(e){say("Seek failed: "+e.message);refresh();}}'
-    + '};'
-    + 'async function refresh(){if(!gid())return;try{PG.g=await(await fetch("/api/guilds")).json();PG.snap=cur();PG.snapAt=Date.now();paint();}catch(e){}}'
-    + 'function paint(){var g=PG.snap;if(!g)return;var n=g.nowPlaying;document.getElementById("ttl").textContent=n?n.title:"— idle —";document.getElementById("by").textContent=n?"Requested by "+n.by:"Choose a server and queue a track.";var c=document.getElementById("cover");if(n&&n.thumb){c.classList.remove("hidden");c.src=n.thumb;}else{c.classList.add("hidden");c.removeAttribute("src");}var dur=n&&n.durationSec?n.durationSec:null;var elapsed=(n&&n.posBase||0)+Math.max(0,(Date.now()-((n&&n.startedAt)||PG.snapAt))/1000)*((n&&n.speed)||1);document.getElementById("tcur").textContent=fmt(elapsed);document.getElementById("ttot").textContent=dur?fmt(dur):"• LIVE";var seekbar=document.getElementById("seekbar");seekbar.disabled=!dur;if(dur&&document.activeElement!==seekbar)seekbar.value=Math.max(0,Math.min(1000,Math.round(elapsed/dur*1000)));document.getElementById("pp").textContent=g.player==="paused"?"▶":"Ⅱ";document.getElementById("loopb").textContent="Loop · "+g.loop;document.getElementById("spdb").textContent=((n&&n.speed)||1)+"×";var v=document.getElementById("vol");if(document.activeElement!==v)v.value=g.volume;var q=document.getElementById("q");q.innerHTML="";(g.queue||[]).forEach(function(x){var li=document.createElement("li");li.className="flex gap-3 py-3";var index=document.createElement("span");index.className="font-mono text-xs text-amber-300";index.textContent=String(q.children.length+1).padStart(2,"0");var title=document.createElement("span");title.className="min-w-0 truncate";title.textContent=x.title||"";li.appendChild(index);li.appendChild(title);q.appendChild(li);});if(!q.children.length){var empty=document.createElement("li");empty.className="py-4 text-sm text-zinc-500";empty.textContent="Queue is empty";q.appendChild(empty);}}'
-    + 'document.getElementById("srv").addEventListener("change",function(){chans();refresh();});if(window.AOS)AOS.init({once:true,duration:520,offset:22,disable:window.matchMedia("(prefers-reduced-motion: reduce)").matches});setInterval(refresh,5000);setInterval(paint,500);load();'
-    + '</script></body></html>';
+  + '<script src="https://cdn.tailwindcss.com"></script><link href="https://unpkg.com/aos@2.3.4/dist/aos.css" rel="stylesheet">'
+  + '<style>body{background-color:#090c10;background-image:linear-gradient(rgba(255,255,255,.025) 1px,transparent 1px),linear-gradient(90deg,rgba(255,255,255,.025) 1px,transparent 1px);background-size:32px 32px}input:focus,select:focus{outline:2px solid #e8b34c;outline-offset:2px}</style></head><body class="min-h-screen text-zinc-100 antialiased">'
+  + '<main class="mx-auto max-w-5xl px-4 py-6 sm:px-6 sm:py-10"><header class="mb-8 flex flex-wrap items-center justify-between gap-4 border-b border-white/10 pb-5" data-aos="fade-down"><div class="flex items-center gap-3"><span class="grid h-10 w-10 place-items-center bg-amber-300 text-xl font-black text-zinc-950">♪</span><div><p class="text-sm font-semibold">Bocchi player</p><p class="font-mono text-[10px] text-zinc-500">LISTENING ROOM</p></div></div><div class="flex flex-wrap items-center gap-2"><a class="px-3 py-2 text-xs text-zinc-400 hover:text-amber-200" href="/dashboard">← Control desk</a><select id="srv" class="border border-white/10 bg-[#10151b] px-3 py-2 text-sm"></select><select id="chn" class="border border-white/10 bg-[#10151b] px-3 py-2 text-sm"></select><button class="border border-white/15 px-3 py-2 text-xs hover:border-amber-300" onclick="P.join()">Join voice</button><button class="border border-white/15 px-3 py-2 text-xs hover:border-rose-300" onclick="P.leave()">Leave</button></div></header>'
+  + '<section class="grid gap-6 lg:grid-cols-[minmax(0,1.2fr)_minmax(280px,.8fr)]" data-aos="fade-up"><div class="border border-white/10 bg-[#10151b] p-4 sm:p-6"><img id="cover" class="mb-5 hidden aspect-video w-full border border-white/10 object-cover" alt="Album art"><p class="font-mono text-[10px] uppercase text-amber-300">Now playing</p><h1 id="ttl" class="mt-2 break-words text-2xl font-semibold sm:text-3xl">— idle —</h1><p id="by" class="mt-2 text-sm text-zinc-400"></p>'
+  + '<div id="lyrics-container" class="mt-6 h-56 overflow-y-auto scroll-smooth rounded bg-[#090c10] p-4 text-center font-medium leading-loose text-zinc-400 hidden shadow-inner border border-white/5"></div>'
+  + '<div class="mt-6 flex flex-wrap items-center gap-2"><button class="h-11 w-12 border border-white/10 text-lg hover:border-amber-300" onclick="P.ctl(\'prev\')" title="Previous">⏮</button><button id="pp" class="h-11 w-12 bg-amber-300 text-lg text-zinc-950 hover:bg-amber-200" onclick="P.toggle()" title="Play or pause">▶</button><button class="h-11 w-12 border border-white/10 text-lg hover:border-amber-300" onclick="P.ctl(\'skip\')" title="Skip">⏭</button><button class="h-11 w-12 border border-rose-400/30 text-lg text-rose-300 hover:bg-rose-400/10" onclick="P.ctl(\'stop\')" title="Stop">■</button><button id="loopb" class="ml-auto border border-white/10 px-3 py-3 text-xs hover:border-amber-300" onclick="P.loop()">Loop · Off</button><button id="spdb" class="border border-white/10 px-3 py-3 text-xs hover:border-amber-300" onclick="P.speed()">1×</button></div>'
+  + '<div class="mt-5 flex flex-wrap items-center gap-3 border-t border-white/5 pt-5"><label class="font-mono text-xs text-zinc-500" for="vol">VOLUME</label><input id="vol" class="min-w-32 flex-1 accent-amber-300" type="range" min="0" max="200" value="100"><button class="border border-white/10 px-3 py-2 text-xs hover:border-amber-300" onclick="P.vol()">Apply</button></div><div class="mt-5 flex gap-2"><input id="q2" type="text" placeholder="Search or paste a link" class="min-w-0 flex-1 border border-white/10 bg-[#090c10] px-3 py-3 text-sm placeholder:text-zinc-600"><button class="bg-amber-300 px-4 py-3 text-sm font-semibold text-zinc-950 hover:bg-amber-200" onclick="P.play()">Queue</button></div><p id="msg" class="mt-3 min-h-5 text-xs text-zinc-500"></p></div>'
+  + '<aside class="border border-white/10 bg-[#10151b] p-4 sm:p-6" data-aos="fade-up" data-aos-delay="100"><div class="mb-4 flex items-end justify-between"><div><p class="font-mono text-[10px] uppercase text-zinc-500">Next tracks</p><h2 class="mt-1 text-lg font-semibold">Up next</h2></div><span class="text-amber-300">☷</span></div><ol id="q" class="divide-y divide-white/5 text-sm text-zinc-300"></ol></aside></section></main>'
+  + '<script src="https://unpkg.com/aos@2.3.4/dist/aos.js"></script><script>'
+  + 'var PG={g:[],id:"",snap:null,snapAt:0};'
+  + 'function say(t){document.getElementById("msg").textContent=t;}'
+  + 'function gid(){var s=document.getElementById("srv");return s&&s.value?s.value:"";}'
+  + 'async function api(p,d){var r=await fetch(p,{method:d?"POST":"GET",headers:{"Content-Type":"application/json"},body:d?JSON.stringify(d):undefined});var j=null;try{j=await r.json();}catch(e){}if(!r.ok||(j&&j.error))throw new Error((j&&j.error)||("HTTP "+r.status));return j;}'
+  + 'async function load(){try{var g=await(await fetch("/api/guilds")).json();PG.g=g;var s=document.getElementById("srv");var keep=s.value;s.innerHTML="";g.forEach(function(x){var o=document.createElement("option");o.value=x.id;o.textContent=x.name;if(x.id===keep)o.selected=true;s.appendChild(o);});if(!s.value&&g.length)s.value=g[0].id;chans();refresh();}catch(e){say("load failed: "+e.message);}}'
+  + 'function cur(){var id=gid();for(var i=0;i<PG.g.length;i++)if(PG.g[i].id===id)return PG.g[i];return null;}'
+  + 'function chans(){var g=cur();var c=document.getElementById("chn");c.innerHTML="";if(!g)return;(g.voice||[]).forEach(function(x){var o=document.createElement("option");o.value=x.id;o.textContent=x.name+" · "+x.members;if(g.botVC===x.id)o.selected=true;c.appendChild(o);});}'
+  + 'var P={'
+  + 'join:async function(){try{var j=await api("/api/join",{guildId:gid(),channelId:document.getElementById("chn").value});say("Joined "+j.channel);load();}catch(e){say("Join failed: "+e.message);}},'
+  + 'leave:async function(){try{await api("/api/leave",{guildId:gid()});say("Left voice");load();}catch(e){say(e.message);}},'
+  + 'play:async function(){var q=document.getElementById("q2").value;if(!q){say("Enter a song first.");return;}try{var j=await api("/api/play",{guildId:gid(),query:q});say("Queued: "+j.title);document.getElementById("q2").value="";refresh();}catch(e){say("Queue failed: "+e.message);}},'
+  + 'ctl:async function(a){try{var j=await api("/api/ctl",{guildId:gid(),action:a});say(j.result);refresh();}catch(e){say(e.message);}},'
+  + 'toggle:async function(){var g=cur();var paused=g&&g.player==="paused";try{var j=await api("/api/ctl",{guildId:gid(),action:paused?"resume":"pause"});say(j.result);refresh();}catch(e){say(e.message);}},'
+  + 'loop:async function(){var g=cur();var nx=g&&g.loop==="off"?"track":(g&&g.loop==="track"?"queue":"off");try{await api("/api/loop",{guildId:gid(),mode:nx});refresh();}catch(e){say(e.message);}},'
+  + 'speed:async function(){var g=cur();var speed=(g&&g.nowPlaying&&g.nowPlaying.speed)||1;try{var j=await api("/api/ctl",{guildId:gid(),action:"speed",value:speed===2?1:2});say("Speed "+j.result+"×");refresh();}catch(e){say(e.message);}},'
+  + 'vol:async function(){try{var j=await api("/api/volume",{guildId:gid(),value:Number(document.getElementById("vol").value)});say("Volume "+j.result+"%");refresh();}catch(e){say(e.message);}}'
+  + '};'
+  + 'async function refresh(){if(!gid())return;try{PG.g=await(await fetch("/api/guilds")).json();PG.snap=cur();PG.snapAt=Date.now();paint();}catch(e){}}'
+  + 'function paint(){var g=PG.snap;if(!g)return;var n=g.nowPlaying;document.getElementById("ttl").textContent=n?n.title:"— idle —";document.getElementById("by").textContent=n?"Requested by "+n.by:"Choose a server and queue a track.";var c=document.getElementById("cover");if(n&&n.thumb){c.classList.remove("hidden");c.src=n.thumb;}else{c.classList.add("hidden");c.removeAttribute("src");}'
+  + 'var lc=document.getElementById("lyrics-container");if(n&&n.lyrics&&n.lyrics.synced&&n.lyrics.synced.length){lc.classList.remove("hidden");if(lc.dataset.title!==n.title){lc.innerHTML="";lc.dataset.title=n.title;n.lyrics.synced.forEach(function(l){var p=document.createElement("p");p.className="lyric-line transition-all duration-300";p.dataset.time=l.time;p.textContent=l.text||"♪";lc.appendChild(p);});}var sp=n.speed||1;var base=n.posBase||0;var t0=n.startedAt||PG.snapAt;var el=base+Math.max(0,(Date.now()-t0)/1000)*sp;var lines=Array.from(lc.children);var aIdx=-1;for(var i=0;i<lines.length;i++){if(parseFloat(lines[i].dataset.time)<=el)aIdx=i;else break;}lines.forEach(function(p,i){if(i===aIdx){if(!p.classList.contains("active")){p.classList.add("active");p.style.color="#fcd34d";p.style.transform="scale(1.1)";lc.scrollTop=p.offsetTop-lc.offsetTop-(lc.clientHeight/2)+(p.clientHeight/2);}}else{p.classList.remove("active");p.style.color="";p.style.transform="";}});}else{lc.classList.add("hidden");lc.dataset.title="";}'
+  + 'document.getElementById("pp").textContent=g.player==="paused"?"▶":"Ⅱ";document.getElementById("loopb").textContent="Loop · "+g.loop;document.getElementById("spdb").textContent=((n&&n.speed)||1)+"×";var v=document.getElementById("vol");if(document.activeElement!==v)v.value=g.volume;var q=document.getElementById("q");q.innerHTML="";(g.queue||[]).forEach(function(x){var li=document.createElement("li");li.className="flex gap-3 py-3";var index=document.createElement("span");index.className="font-mono text-xs text-amber-300";index.textContent=String(q.children.length+1).padStart(2,"0");var title=document.createElement("span");title.className="min-w-0 truncate";title.textContent=x.title||"";li.appendChild(index);li.appendChild(title);q.appendChild(li);});if(!q.children.length){var empty=document.createElement("li");empty.className="py-4 text-sm text-zinc-500";empty.textContent="Queue is empty";q.appendChild(empty);}}'
+  + 'document.getElementById("srv").addEventListener("change",function(){chans();refresh();});if(window.AOS)AOS.init({once:true,duration:520,offset:22,disable:window.matchMedia("(prefers-reduced-motion: reduce)").matches});setInterval(refresh,5000);setInterval(paint,500);load();'
+  + '</script></body></html>';
 }
 
 function dashPlayerPage() {
   return '<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Music Bot — Web Player</title>'
-    + '<style>body{font-family:system-ui;background:#0b1020;color:#e2e8f0;margin:0;padding:20px}.wrap{max-width:720px;margin:0 auto}.top{display:flex;gap:8px;align-items:center;margin-bottom:12px;flex-wrap:wrap}a{color:#93c5fd}select,input[type=text]{padding:8px;border-radius:8px;border:1px solid #334155;background:#020617;color:#e2e8f0}.card{background:#141b31;border:1px solid #263154;padding:18px;border-radius:14px;margin:12px 0}.cover{width:100%;max-height:340px;object-fit:cover;border-radius:10px;background:#000;display:none}#ttl{font-size:20px;font-weight:800;margin:12px 0 2px}#by{color:#94a3b8;font-size:13px}#barwrap{margin:14px 0 4px;cursor:pointer}#bar{height:8px;background:#263154;border-radius:99px;position:relative}#fill{height:100%;width:0%;background:#5865F2;border-radius:99px}#knob{width:14px;height:14px;background:#fff;border-radius:99px;position:absolute;top:-3px;left:0%}#times{display:flex;justify-content:space-between;font-size:12px;color:#94a3b8}.row{display:flex;gap:8px;margin-top:12px;flex-wrap:wrap;align-items:center}button{padding:10px 16px;border:0;border-radius:10px;background:#5865F2;color:#fff;font-weight:700;cursor:pointer;font-size:15px}.ghost{background:#334155}.danger{background:#b91c1c}.vol{display:flex;gap:8px;align-items:center}input[type=range]{width:140px}#q{margin:8px 0 0;padding-left:20px;font-size:14px}#msg{color:#94a3b8;font-size:13px;min-height:18px}</style></head><body><div class="wrap">'
-    + '<div class="top"><a href="/dashboard">← Dashboard</a><select id="srv"></select><select id="chn"></select><button class="ghost" onclick="P.join()">Join</button><button class="ghost" onclick="P.leave()">Leave</button></div>'
-    + '<div class="card"><img id="cover" class="cover" alt=""><div id="ttl">— idle —</div><div id="by"></div>'
-    + '<div id="barwrap" onclick="P.seek(event)"><div id="bar"><div id="fill"></div><div id="knob"></div></div></div>'
-    + '<div id="times"><span id="tcur">0:00</span><span id="ttot">• LIVE</span></div>'
-    + '<div class="row"><button onclick="P.ctl(\'prev\')">⏮</button><button id="pp" onclick="P.toggle()">▶</button><button onclick="P.ctl(\'skip\')">⏭</button><button class="danger" onclick="P.ctl(\'stop\')">⏹</button><button class="ghost" id="loopb" onclick="P.loop()">🔁 off</button><button class="ghost" id="spdb" onclick="P.speed()">1x</button></div>'
-    + '<div class="row vol"><span>🔊</span><input id="vol" type="range" min="0" max="200" value="100"><button class="ghost" onclick="P.vol()">Set</button></div>'
-    + '<div class="row"><input id="q2" type="text" placeholder="song name or URL" style="flex:1;min-width:200px"><button onclick="P.play()">+ Queue</button></div>'
-    + '<div id="msg"></div></div>'
-    + '<div class="card"><h3 style="margin:0 0 8px">📋 Up next</h3><ol id="q"></ol></div>'
-    + '</div><script>'
-    + 'var PG={g:[],id:"",snap:null,snapAt:0};'
-    + 'function esc(s){return String(s==null?"":s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");}'
-    + 'function say(t){document.getElementById("msg").textContent=t;}'
-    + 'function gid(){var s=document.getElementById("srv");return s&&s.value?s.value:"";}'
-    + 'function fmt(s){if(s==null||!isFinite(s)||s<0)return"• LIVE";s=Math.floor(s);var m=Math.floor(s/60);s=s%60;return m+":"+(s<10?"0":"")+s;}'
-    + 'async function api(p,d){var r=await fetch(p,{method:d?"POST":"GET",headers:{"Content-Type":"application/json"},body:d?JSON.stringify(d):undefined});var j=null;try{j=await r.json();}catch(e){}if(!r.ok||(j&&j.error))throw new Error((j&&j.error)||("HTTP "+r.status));return j;}'
-    + 'async function load(){try{var g=await(await fetch("/api/guilds")).json();PG.g=g;var s=document.getElementById("srv");var keep=s.value;s.innerHTML="";g.forEach(function(x){var o=document.createElement("option");o.value=x.id;o.textContent=x.name;if(x.id===keep)o.selected=true;s.appendChild(o);});if(!s.value&&g.length)s.value=g[0].id;chans();refresh();}catch(e){say("load failed: "+e.message);}}'
-    + 'function cur(){var id=gid();for(var i=0;i<PG.g.length;i++)if(PG.g[i].id===id)return PG.g[i];return null;}'
-    + 'function chans(){var g=cur();var c=document.getElementById("chn");c.innerHTML="";if(!g)return;(g.voice||[]).forEach(function(x){var o=document.createElement("option");o.value=x.id;o.textContent=x.name+" ("+x.members+")";if(g.botVC===x.id)o.selected=true;c.appendChild(o);});}'
-    + 'var P={'
-    + 'join:async function(){try{var j=await api("/api/join",{guildId:gid(),channelId:document.getElementById("chn").value});say("joined "+j.channel);load();}catch(e){say("join failed: "+e.message);}},'
-    + 'leave:async function(){try{await api("/api/leave",{guildId:gid()});say("left");load();}catch(e){say(e.message);}},'
-    + 'play:async function(){var q=document.getElementById("q2").value;if(!q){say("type a song first");return;}try{var j=await api("/api/play",{guildId:gid(),query:q});say("queued: "+j.title);document.getElementById("q2").value="";refresh();}catch(e){say("play failed: "+e.message);}},'
-    + 'ctl:async function(a){try{var j=await api("/api/ctl",{guildId:gid(),action:a});say(a+": "+j.result);refresh();}catch(e){say(e.message);}},'
-    + 'toggle:async function(){var g=cur();var paused=g&&g.player==="paused";try{var j=await api("/api/ctl",{guildId:gid(),action:paused?"resume":"pause"});say(j.result);refresh();}catch(e){say(e.message);}},'
-    + 'loop:async function(){var g=cur();var nx=g&&g.loop==="off"?"track":(g&&g.loop==="track"?"queue":"off");try{await api("/api/loop",{guildId:gid(),mode:nx});refresh();}catch(e){say(e.message);}},'
-    + 'speed:async function(){var g=cur();var curSpd=(g&&g.nowPlaying&&g.nowPlaying.speed)||1;var v=(curSpd===2)?1:2;try{var j=await api("/api/ctl",{guildId:gid(),action:"speed",value:v});say("speed "+j.result+"x");refresh();}catch(e){say(e.message);}},'
-    + 'vol:async function(){try{var j=await api("/api/volume",{guildId:gid(),value:Number(document.getElementById("vol").value)});say("volume "+j.result);refresh();}catch(e){say(e.message);}},'
-    + 'seek:async function(ev){var g=cur();if(!g||!g.nowPlaying||!g.nowPlaying.durationSec){say("live stream — cannot seek");return;}var r=document.getElementById("bar").getBoundingClientRect();var ratio=(ev.clientX-r.left)/r.width;ratio=Math.max(0,Math.min(1,ratio));var sec=Math.floor(ratio*g.nowPlaying.durationSec);try{await api("/api/seek",{guildId:gid(),seconds:sec});say("seek → "+fmt(sec));refresh();}catch(e){say(e.message);}}'
-    + '};'
-    + 'async function refresh(){var id=gid();if(!id)return;try{var gs=await(await fetch("/api/guilds")).json();PG.g=gs;var g=cur();if(!g)return;PG.snap=g;PG.snapAt=Date.now();paint();}catch(e){}}'
-    + 'function paint(){var g=PG.snap;if(!g)return;var np=g.nowPlaying;document.getElementById("ttl").textContent=np?np.title:"— idle —";document.getElementById("by").textContent=np?("by "+np.by):"";var cv=document.getElementById("cover");if(np&&np.thumb){cv.style.display="block";if(cv.src!==np.thumb)cv.src=np.thumb;}else{cv.style.display="none";cv.removeAttribute("src");}'
-    + 'var dur=np&&np.durationSec?np.durationSec:null;var sp=(np&&np.speed)||1;var base=(np&&np.posBase)||0;var t0=(np&&np.startedAt)||PG.snapAt;var el=base+Math.max(0,(Date.now()-t0)/1000)*sp;'
-    + 'document.getElementById("tcur").textContent=fmt(el);document.getElementById("ttot").textContent=dur?fmt(dur):"• LIVE";'
-    + 'var pct=dur?Math.max(0,Math.min(100,el/dur*100)):0;document.getElementById("fill").style.width=pct+"%";document.getElementById("knob").style.left=pct+"%";'
-    + 'document.getElementById("pp").textContent=(g.player==="paused")?"▶":"⏸";'
-    + 'document.getElementById("loopb").textContent="🔁 "+g.loop;document.getElementById("spdb").textContent=(np&&np.speed===2)?"2x":"1x";'
-    + 'var v=document.getElementById("vol");if(v&&document.activeElement!==v)v.value=g.volume;'
-    + 'var q=document.getElementById("q");q.innerHTML="";(g.queue||[]).forEach(function(x){var li=document.createElement("li");li.textContent=x.title;q.appendChild(li);});if(!(g.queue||[]).length){var li=document.createElement("li");li.textContent="— empty —";q.appendChild(li);}}'
-    + 'document.getElementById("srv").addEventListener("change",function(){chans();refresh();});'
-    + 'setInterval(refresh,5000);setInterval(paint,500);load();'
-    + '</scr' + 'ipt></body></html>';
+  + '<style>body{font-family:system-ui;background:#0b1020;color:#e2e8f0;margin:0;padding:20px}.wrap{max-width:720px;margin:0 auto}.top{display:flex;gap:8px;align-items:center;margin-bottom:12px;flex-wrap:wrap}a{color:#93c5fd}select,input[type=text]{padding:8px;border-radius:8px;border:1px solid #334155;background:#020617;color:#e2e8f0}.card{background:#141b31;border:1px solid #263154;padding:18px;border-radius:14px;margin:12px 0}.cover{width:100%;max-height:340px;object-fit:cover;border-radius:10px;background:#000;display:none}#ttl{font-size:20px;font-weight:800;margin:12px 0 2px}#by{color:#94a3b8;font-size:13px}#barwrap{margin:14px 0 4px;cursor:pointer}#bar{height:8px;background:#263154;border-radius:99px;position:relative}#fill{height:100%;width:0%;background:#5865F2;border-radius:99px}#knob{width:14px;height:14px;background:#fff;border-radius:99px;position:absolute;top:-3px;left:0%}#times{display:flex;justify-content:space-between;font-size:12px;color:#94a3b8}.row{display:flex;gap:8px;margin-top:12px;flex-wrap:wrap;align-items:center}button{padding:10px 16px;border:0;border-radius:10px;background:#5865F2;color:#fff;font-weight:700;cursor:pointer;font-size:15px}.ghost{background:#334155}.danger{background:#b91c1c}.vol{display:flex;gap:8px;align-items:center}input[type=range]{width:140px}#q{margin:8px 0 0;padding-left:20px;font-size:14px}#msg{color:#94a3b8;font-size:13px;min-height:18px}</style></head><body><div class="wrap">'
+  + '<div class="top"><a href="/dashboard">← Dashboard</a><select id="srv"></select><select id="chn"></select><button class="ghost" onclick="P.join()">Join</button><button class="ghost" onclick="P.leave()">Leave</button></div>'
+  + '<div class="card"><img id="cover" class="cover" alt=""><div id="ttl">— idle —</div><div id="by"></div>'
+  + '<div id="lyrics-container" style="display:none; height:220px; overflow-y:auto; scroll-behavior:smooth; margin:16px 0; padding:12px; background:#020617; border-radius:8px; border:1px solid #334155; text-align:center; color:#94a3b8; font-size:15px; line-height:1.8;"></div>'
+  + '<div id="barwrap" onclick="P.seek(event)"><div id="bar"><div id="fill"></div><div id="knob"></div></div></div>'
+  + '<div id="times"><span id="tcur">0:00</span><span id="ttot">• LIVE</span></div>'
+  + '<div class="row"><button onclick="P.ctl(\'prev\')">⏮</button><button id="pp" onclick="P.toggle()">▶</button><button onclick="P.ctl(\'skip\')">⏭</button><button class="danger" onclick="P.ctl(\'stop\')">⏹</button><button class="ghost" id="loopb" onclick="P.loop()">🔁 off</button><button class="ghost" id="spdb" onclick="P.speed()">1x</button></div>'
+  + '<div class="row vol"><span>🔊</span><input id="vol" type="range" min="0" max="200" value="100"><button class="ghost" onclick="P.vol()">Set</button></div>'
+  + '<div class="row"><input id="q2" type="text" placeholder="song name or URL" style="flex:1;min-width:200px"><button onclick="P.play()">+ Queue</button></div>'
+  + '<div id="msg"></div></div>'
+  + '<div class="card"><h3 style="margin:0 0 8px">📋 Up next</h3><ol id="q"></ol></div>'
+  + '</div><script>'
+  + 'var PG={g:[],id:"",snap:null,snapAt:0};'
+  + 'function esc(s){return String(s==null?"":s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");}'
+  + 'function say(t){document.getElementById("msg").textContent=t;}'
+  + 'function gid(){var s=document.getElementById("srv");return s&&s.value?s.value:"";}'
+  + 'function fmt(s){if(s==null||!isFinite(s)||s<0)return"• LIVE";s=Math.floor(s);var m=Math.floor(s/60);s=s%60;return m+":"+(s<10?"0":"")+s;}'
+  + 'async function api(p,d){var r=await fetch(p,{method:d?"POST":"GET",headers:{"Content-Type":"application/json"},body:d?JSON.stringify(d):undefined});var j=null;try{j=await r.json();}catch(e){}if(!r.ok||(j&&j.error))throw new Error((j&&j.error)||("HTTP "+r.status));return j;}'
+  + 'async function load(){try{var g=await(await fetch("/api/guilds")).json();PG.g=g;var s=document.getElementById("srv");var keep=s.value;s.innerHTML="";g.forEach(function(x){var o=document.createElement("option");o.value=x.id;o.textContent=x.name;if(x.id===keep)o.selected=true;s.appendChild(o);});if(!s.value&&g.length)s.value=g[0].id;chans();refresh();}catch(e){say("load failed: "+e.message);}}'
+  + 'function cur(){var id=gid();for(var i=0;i<PG.g.length;i++)if(PG.g[i].id===id)return PG.g[i];return null;}'
+  + 'function chans(){var g=cur();var c=document.getElementById("chn");c.innerHTML="";if(!g)return;(g.voice||[]).forEach(function(x){var o=document.createElement("option");o.value=x.id;o.textContent=x.name+" ("+x.members+")";if(g.botVC===x.id)o.selected=true;c.appendChild(o);});}'
+  + 'var P={'
+  + 'join:async function(){try{var j=await api("/api/join",{guildId:gid(),channelId:document.getElementById("chn").value});say("joined "+j.channel);load();}catch(e){say("join failed: "+e.message);}},'
+  + 'leave:async function(){try{await api("/api/leave",{guildId:gid()});say("left");load();}catch(e){say(e.message);}},'
+  + 'play:async function(){var q=document.getElementById("q2").value;if(!q){say("type a song first");return;}try{var j=await api("/api/play",{guildId:gid(),query:q});say("queued: "+j.title);document.getElementById("q2").value="";refresh();}catch(e){say("play failed: "+e.message);}},'
+  + 'ctl:async function(a){try{var j=await api("/api/ctl",{guildId:gid(),action:a});say(a+": "+j.result);refresh();}catch(e){say(e.message);}},'
+  + 'toggle:async function(){var g=cur();var paused=g&&g.player==="paused";try{var j=await api("/api/ctl",{guildId:gid(),action:paused?"resume":"pause"});say(j.result);refresh();}catch(e){say(e.message);}},'
+  + 'loop:async function(){var g=cur();var nx=g&&g.loop==="off"?"track":(g&&g.loop==="track"?"queue":"off");try{await api("/api/loop",{guildId:gid(),mode:nx});refresh();}catch(e){say(e.message);}},'
+  + 'speed:async function(){var g=cur();var curSpd=(g&&g.nowPlaying&&g.nowPlaying.speed)||1;var v=(curSpd===2)?1:2;try{var j=await api("/api/ctl",{guildId:gid(),action:"speed",value:v});say("speed "+j.result+"x");refresh();}catch(e){say(e.message);}},'
+  + 'vol:async function(){try{var j=await api("/api/volume",{guildId:gid(),value:Number(document.getElementById("vol").value)});say("volume "+j.result);refresh();}catch(e){say(e.message);}},'
+  + 'seek:async function(ev){var g=cur();if(!g||!g.nowPlaying||!g.nowPlaying.durationSec){say("live stream — cannot seek");return;}var r=document.getElementById("bar").getBoundingClientRect();var ratio=(ev.clientX-r.left)/r.width;ratio=Math.max(0,Math.min(1,ratio));var sec=Math.floor(ratio*g.nowPlaying.durationSec);try{await api("/api/seek",{guildId:gid(),seconds:sec});say("seek → "+fmt(sec));refresh();}catch(e){say(e.message);}}'
+  + '};'
+  + 'async function refresh(){var id=gid();if(!id)return;try{var gs=await(await fetch("/api/guilds")).json();PG.g=gs;var g=cur();if(!g)return;PG.snap=g;PG.snapAt=Date.now();paint();}catch(e){}}'
+  + 'function paint(){var g=PG.snap;if(!g)return;var np=g.nowPlaying;document.getElementById("ttl").textContent=np?np.title:"— idle —";document.getElementById("by").textContent=np?("by "+np.by):"";var cv=document.getElementById("cover");if(np&&np.thumb){cv.style.display="block";if(cv.src!==np.thumb)cv.src=np.thumb;}else{cv.style.display="none";cv.removeAttribute("src");}'
+  + 'var lc=document.getElementById("lyrics-container");if(np&&np.lyrics&&np.lyrics.synced&&np.lyrics.synced.length){lc.style.display="block";if(lc.dataset.title!==np.title){lc.innerHTML="";lc.dataset.title=np.title;np.lyrics.synced.forEach(function(l){var p=document.createElement("p");p.style.transition="all 0.3s";p.dataset.time=l.time;p.textContent=l.text||"♪";lc.appendChild(p);});}var sp=np.speed||1;var base=np.posBase||0;var t0=np.startedAt||PG.snapAt;var el=base+Math.max(0,(Date.now()-t0)/1000)*sp;var lines=Array.from(lc.children);var aIdx=-1;for(var i=0;i<lines.length;i++){if(parseFloat(lines[i].dataset.time)<=el)aIdx=i;else break;}lines.forEach(function(p,i){if(i===aIdx){if(p.dataset.active!=="1"){p.dataset.active="1";p.style.color="#fcd34d";p.style.transform="scale(1.1)";p.style.fontWeight="bold";lc.scrollTop=p.offsetTop-lc.offsetTop-(lc.clientHeight/2)+(p.clientHeight/2);}}else{p.dataset.active="0";p.style.color="";p.style.transform="";p.style.fontWeight="";}});}else{lc.style.display="none";lc.dataset.title="";}'
+  + 'var dur=np&&np.durationSec?np.durationSec:null;var sp=(np&&np.speed)||1;var base=(np&&np.posBase)||0;var t0=(np&&np.startedAt)||PG.snapAt;var el=base+Math.max(0,(Date.now()-t0)/1000)*sp;'
+  + 'document.getElementById("tcur").textContent=fmt(el);document.getElementById("ttot").textContent=dur?fmt(dur):"• LIVE";'
+  + 'var pct=dur?Math.max(0,Math.min(100,el/dur*100)):0;document.getElementById("fill").style.width=pct+"%";document.getElementById("knob").style.left=pct+"%";'
+  + 'document.getElementById("pp").textContent=(g.player==="paused")?"▶":"⏸";'
+  + 'document.getElementById("loopb").textContent="🔁 "+g.loop;document.getElementById("spdb").textContent=(np&&np.speed===2)?"2x":"1x";'
+  + 'var v=document.getElementById("vol");if(v&&document.activeElement!==v)v.value=g.volume;'
+  + 'var q=document.getElementById("q");q.innerHTML="";(g.queue||[]).forEach(function(x){var li=document.createElement("li");li.textContent=x.title;q.appendChild(li);});if(!(g.queue||[]).length){var li=document.createElement("li");li.textContent="— empty —";q.appendChild(li);}}'
+  + 'document.getElementById("srv").addEventListener("change",function(){chans();refresh();});'
+  + 'setInterval(refresh,5000);setInterval(paint,500);load();'
+  + '</scr' + 'ipt></body></html>';
 }
 function startDashboard() {
   const server = http.createServer(async (req, res) => {
