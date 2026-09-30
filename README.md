@@ -176,11 +176,11 @@ aptPkgs = ["ffmpeg", "python3", "ca-certificates", "tzdata"]
 
 ---
 
-## 📝 Prefix Commands (`n!`)
+## 💬 Commands (slash only)
 
-Legacy prefix commands are also supported:
+All commands are Discord slash commands — the legacy `n!` prefix was removed:
 
-`n!play`, `n!skip`, `n!stop`, `n!pause`, `n!resume`, `n!np`, `n!queue`, `n!volume`, `n!loop`, `n!shuffle`, `n!remove`, `n!help`
+`/play`, `/skip`, `/stop`, `/pause`, `/resume`, `/np`, `/queue`, `/volume`, `/loop`, `/shuffle`, `/remove`, `/playlist`, `/help`, `/panel`, `/setup`, `/video`, `/watchtogether`, `/vstate`, `/ytsignin`, `/ytsignout`, `/ytstatus`
 
 ---
 

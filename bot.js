@@ -1366,10 +1366,6 @@ async function upsertNpMessage(guild, channelId, embed, withControls = true) {
 
 // ────────────────────────────────────────────────────────────────────────────
 
-async function replyAck(msg, text) {
-  try { return await msg.channel.send({ content: text }); } catch { return null; }
-}
-
 const aiChatBusy = new Set();
 const privateAiSessions = new Map();
 async function getPrivateAiSession(itx) {
@@ -1512,7 +1508,7 @@ async function runDmMusicCommand(msg, guild, cmd, parts) {
   if (cmd === "playlist") {
     const parsed = parseLimitFromArgs(parts);
     const q = parsed.tokens.join(" ").trim();
-    if (!q) return reply({ embeds: [errorEmbed(`Please give a playlist link or search text\n**Example:** \`${BOT_PREFIX}playlist lofi playlist --limit 20\``)] });
+    if (!q) return reply({ embeds: [errorEmbed(`Please give a playlist link or search text\n**Example:** \`/playlist query:lofi playlist\``)] });
     if (!userVC) return reply({ embeds: [errorEmbed(`I'm not in a voice room in **${guild.name}** yet — run \`/setup\` in the server first.`)] });
     const items = await fetchPlaylistEntries(q, parsed.limit);
     if (!items.length) return reply({ embeds: [errorEmbed("No songs found in the playlist or search results")] });
@@ -1555,11 +1551,11 @@ async function runDmMusicCommand(msg, guild, cmd, parts) {
     markNpStopped(guild).catch(() => { });
     return reply({ embeds: [successEmbed("🛑 Stopped", "Queue cleared and left voice")] });
   }
-  if (cmd === "pause") { state.player.pause(); return reply({ embeds: [infoEmbed("⏸️ Paused", `Type \`${BOT_PREFIX}resume\` to resume`)] }); }
+  if (cmd === "pause") { state.player.pause(); return reply({ embeds: [infoEmbed("⏸️ Paused", `Use \`/resume\` to resume`)] }); }
   if (cmd === "resume") { state.player.unpause(); return reply({ embeds: [successEmbed("▶️ Resumed", `Now playing: **${state.current?.title || "—"}**`)] }); }
   if (cmd === "volume") {
     const value = parseInt(parts[0], 10);
-    if (Number.isNaN(value)) return reply({ embeds: [errorEmbed(`Please give a volume number (0-10000)\n**Example:** \`${BOT_PREFIX}volume 80\``)] });
+    if (Number.isNaN(value)) return reply({ embeds: [errorEmbed(`Please give a volume number (0-10000)\n**Example:** \`/volume value:80\``)] });
     setVolumePct(state, value);
     const bar = "█".repeat(Math.round(Math.min(state.volumePct, 200) / 20)) + "░".repeat(10 - Math.round(Math.min(state.volumePct, 200) / 20));
     return reply({ embeds: [successEmbed("🔊  Volume updated", `\`${bar}\` **${state.volumePct}%**`)] });
@@ -1576,7 +1572,7 @@ async function runDmMusicCommand(msg, guild, cmd, parts) {
   }
   if (cmd === "remove") {
     const index = parseInt(parts[0], 10);
-    if (Number.isNaN(index) || index < 1) return reply({ embeds: [errorEmbed(`Please give the queue number to remove\n**Example:** \`${BOT_PREFIX}remove 3\``)] });
+    if (Number.isNaN(index) || index < 1) return reply({ embeds: [errorEmbed(`Please give the queue number to remove\n**Example:** \`/remove index:3\``)] });
     if (index > state.queue.length) return reply({ embeds: [errorEmbed(`Number is past the queue end (${state.queue.length} tracks)`)] });
     const [rm] = state.queue.splice(index - 1, 1);
     return reply({ embeds: [successEmbed("🗑️  Removed from queue", `**${rm?.title || "Unknown"}**`)] });
