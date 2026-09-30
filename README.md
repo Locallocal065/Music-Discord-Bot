@@ -195,3 +195,8 @@ Legacy prefix commands are also supported:
 ## 📄 License
 
 MIT — feel free to fork and customize!
+
+
+Refference:
+
+https://github.com/ninjamadeena/music-discord-bot
