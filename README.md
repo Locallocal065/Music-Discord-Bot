@@ -191,12 +191,6 @@ Legacy prefix commands are also supported:
 - Bot responses that only you should see are **ephemeral** (private)
 
 ---
-
-## 📄 License
-
-MIT — feel free to fork and customize!
-
-
 Refference:
 
 https://github.com/ninjamadeena/music-discord-bot
