@@ -2248,7 +2248,7 @@ function spawnUniversalPipe(source, playerClient, offsetSec) {
   if (!FFMPEG_AVAILABLE) throw new Error("ffmpeg binary not available");
 
   // ── yt-dlp ───────────────────────────────────────────────────────────────
-  const isTikTok = source.includes("tiktok.com") || source.includes("vt.tiktok.com");
+  const isTikTok = source.includes("tiktok.com") || source.includes("vt.tiktok.com") || source.includes("workers.dev");
   const ytArgs = [];
   if (config.ytdlpForceIpv4) ytArgs.push("--force-ipv4");
   const ckFile = effectiveCookieFile();
@@ -2848,12 +2848,14 @@ async function startPlayback(guild, item, state, stayPut = false) {
       // Use the Cloudflare proxy to fetch the TikTok CDN URL
       const cfProxyUrl = "https://bold-wood-cfdb.locallocal065.workers.dev/?url=" + encodeURIComponent(meta.audioUrl);
       logPretty("LOG", `[tikwm] audio via CF proxy <- ${meta.audioUrl.slice(0, 90)}...`);
-      const headers = "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36\r\nReferer: https://www.tiktok.com/\r\n";
-      const pipeObj = spawnFfmpegFromDirectUrl(cfProxyUrl, headers);
+      
+      // Cloudflare blocks raw ffmpeg HTTP requests from Railway (datacenter IPs),
+      // so we use yt-dlp (which impersonates Chrome) to download the CF Proxy URL instead!
+      const pipeObj = spawnUniversalPipe(cfProxyUrl, item.altClient || undefined, consumeOffset(item, state));
       await playPipe(guild, item, state, pipeObj);
       return { pageUrl: source };
     } catch (e) {
-      logPretty("WARN", `[tikwm] failed (${e?.message || e}), falling back to yt-dlp`);
+      logPretty("WARN", `[tikwm] failed (${e?.message || e}), falling back to direct yt-dlp`);
     }
   }
 
