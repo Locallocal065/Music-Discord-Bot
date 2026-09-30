@@ -2847,11 +2847,19 @@ async function startPlayback(guild, item, state, stayPut = false) {
       
       // Use the Cloudflare proxy to fetch the TikTok CDN URL
       const cfProxyUrl = "https://bold-wood-cfdb.locallocal065.workers.dev/?url=" + encodeURIComponent(meta.audioUrl);
-      logPretty("LOG", `[tikwm] audio via CF proxy <- ${meta.audioUrl.slice(0, 90)}...`);
+      logPretty("LOG", `[tikwm] audio via CF proxy (fetch) <- ${meta.audioUrl.slice(0, 90)}...`);
       
-      // Cloudflare blocks raw ffmpeg HTTP requests from Railway (datacenter IPs),
-      // so we use yt-dlp (which impersonates Chrome) to download the CF Proxy URL instead!
-      const pipeObj = spawnUniversalPipe(cfProxyUrl, item.altClient || undefined, consumeOffset(item, state));
+      // Node.js fetch() easily bypasses Cloudflare's Bot Fight Mode which was blocking
+      // ffmpeg and yt-dlp on Railway datacenter IPs. We fetch the stream and pipe it.
+      const res = await fetch(cfProxyUrl, {
+        headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36' }
+      });
+      if (!res.ok) throw new Error(`CF proxy returned ${res.status}`);
+      
+      const { Readable } = require("stream");
+      const pipeObj = spawnFfmpegStdin("tiktok-cf", consumeOffset(item, state));
+      Readable.fromWeb(res.body).pipe(pipeObj.ff.stdin);
+      
       await playPipe(guild, item, state, pipeObj);
       return { pageUrl: source };
     } catch (e) {
