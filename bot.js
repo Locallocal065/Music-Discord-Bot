@@ -1,13 +1,3 @@
-const { logConfiguration, readLastUpdateTs, writeLastUpdateTs, runYtDlpUpdate, msUntilNextBangkokMidnight, scheduleDailyBangkokMidnight, ytCookiesPath, ytCookiesStatus, saveYTCookies, isGuildAdmin, wsPing } = require("./function/system.js");
-const { volumeStorePath, loadGuildSettings, effectiveCookieFile, saveGuildSettings, getSavedVolume, setSavedVolume, getSavedSpeed, setSavedSpeed, getSavedShowLyrics, setSavedShowLyrics, getSavedShowControls, setSavedShowControls, getSavedMusicVoice, setSavedMusicVoice, getSavedAiChannel, aiSessionKeyForChannel, setSavedAiChannel, getSavedControlChannel, setSavedControlChannel } = require("./function/settings.js");
-const { parseSyncedLyrics, lyricIndexAt, fetchLyrics, karaokeField, estimateSyncedLyrics } = require("./function/lyrics.js");
-const { aiSystemInstruction, askOpenRouter, askGemini, loadAiHistories, loadAiPersonas, saveAiPersonas, getAiPersona, setAiPersona, saveAiHistories, askGeminiWithHistory, clearGuildAiChats } = require("./function/ai.js");
-const { swallowPipeError, checkFfmpegAvailability, getDirectAudioUrlAndHeaders, buildFfmpegHeadersString, spawnFfmpegFromDirectUrl, spawnUniversalPipe, clampSpeed, combineAudioFilters, spawnFfmpegStdin, cushionStream, awaitPrebuffer, spawnTikTokPipe, cleanupCurrentPipeline } = require("./function/stream.js");
-const { isSpotifyUrl, normalizeSpotifyUrl, spotifyKind, fetchJsonWithTimeout, spotifyTitle, spotifyTrackToSearchQuery, spotifyMeta, tiktokMeta, tiktokMetaOnce, tiktokHeaders, isTikTokUrl, getTitle, thumbFor, extractYouTubeIdSafe, pickThumb, resolveTitleAndThumb, resolveFirstVideoUrl, extractYouTubeId, resolveVideoInfo } = require("./function/metadata.js");
-const { buildTransportRows, buildSettingsRow, buildControlRows, buildPanelEmbed, buildVideoRows } = require("./function/ui.js");
-const { dashLoginPage, sharedDashCss, dashPage, dashPageTailwind, dashPlayerPageTailwind, dashPlayerPage } = require("./function/dashboardUI.js");
-const { COLORS, makeEmbed, successEmbed, errorEmbed, infoEmbed, musicEmbed, buildNowPlayingEmbed, buildHelpEmbedSlash } = require("./function/embeds.js");
-const { nowStr, nowStrShort, writeLog, fmtTime, cleanTitle, shuffleArray, loopLabel, isUrl, numOrNull } = require("./function/utils.js");
 // index.js
 require("dotenv").config();
 const path = require("path");
@@ -16,36 +6,261 @@ const crypto = require("crypto");
 
 // --- Spotify link support (no direct Spotify audio streaming) ---
 // Accept Spotify TRACK/EPISODE URLs/URIs and convert to a YouTube search query.
-
-
-
-
-
-
+function isSpotifyUrl(s) {
+  return typeof s === "string" && (s.includes("open.spotify.com/") || s.startsWith("spotify:"));
+}
+function normalizeSpotifyUrl(input) {
+  if (!input || typeof input !== "string") return null;
+  const m = input.match(/^spotify:(track|album|playlist|episode):([A-Za-z0-9]+)$/);
+  if (m) return `https://open.spotify.com/${m[1]}/${m[2]}`;
+  return input.replace(/^<|>$/g, "");
+}
+function spotifyKind(url) {
+  const u = normalizeSpotifyUrl(url);
+  if (!u) return null;
+  const m = u.match(/open\.spotify\.com\/(track|album|playlist|episode)\/([A-Za-z0-9]+)/i);
+  return m ? m[1].toLowerCase() : null;
+}
+async function fetchJsonWithTimeout(url, ms = 8000) {
+  const ctrl = new AbortController();
+  const t = setTimeout(() => ctrl.abort(), ms);
+  try {
+    const res = await fetch(url, { signal: ctrl.signal, headers: { "Accept": "application/json" } });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    return await res.json();
+  } finally {
+    clearTimeout(t);
+  }
+}
+async function spotifyTitle(input) {
+  const url = normalizeSpotifyUrl(input);
+  const kind = spotifyKind(url);
+  if (!kind) return null;
+  const oembedUrl = `https://open.spotify.com/oembed?url=${encodeURIComponent(url)}`;
+  const data = await fetchJsonWithTimeout(oembedUrl, 8000);
+  return data?.title ? String(data.title) : null;
+}
+async function spotifyTrackToSearchQuery(input) {
+  const url = normalizeSpotifyUrl(input);
+  const kind = spotifyKind(url);
+  if (kind !== "track" && kind !== "episode") return null;
+  const t = await spotifyTitle(url);
+  if (!t) return null;
+  return `${t} audio`;
+}
 // --- end Spotify support ---
 
 // --- TikTok via TikWM (metadata + direct audio stream, no yt-dlp) ---
-
+function aiSystemInstruction(persona = "") {
+  const identity = "Your name is Bocchi (ぼっち). You are the AI assistant in this Discord music bot. If asked your name, say Bocchi (ぼっち).";
+  return persona ? `${identity}\n\nChat-specific persona:\n${persona}` : identity;
+}
 const GEMINI_QUOTA_COOLDOWN_MS = 15 * 60 * 1000;
 let geminiQuotaCooldownUntil = 0;
-
-
+async function askOpenRouter(question, history = [], persona = "") {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 30000);
+  try {
+    const messages = [{ role: "system", content: aiSystemInstruction(persona) }];
+    for (const entry of history) {
+      const content = Array.isArray(entry?.parts) ? entry.parts.map((part) => part?.text || "").join("") : "";
+      if (content) messages.push({ role: entry.role === "model" ? "assistant" : "user", content });
+    }
+    messages.push({ role: "user", content: question });
+    const response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+      method: "POST",
+      signal: controller.signal,
+      headers: {
+        "Authorization": `Bearer ${config.openRouterApiKey}`,
+        "Content-Type": "application/json",
+        "HTTP-Referer": "https://discord.com",
+        "X-Title": "Discord Music Bot",
+      },
+      body: JSON.stringify({ model: config.openRouterModel, messages, max_tokens: 1024 }),
+    });
+    const data = await response.json().catch(() => null);
+    if (!response.ok) {
+      const detail = data?.error?.message;
+      throw new Error(`OpenRouter request failed (HTTP ${response.status})${detail ? `: ${String(detail).slice(0, 500)}` : ""}`);
+    }
+    const answer = data?.choices?.[0]?.message?.content;
+    if (typeof answer !== "string" || !answer.trim()) throw new Error("OpenRouter returned no answer.");
+    const text = answer.trim();
+    return text.length > 1900 ? text.slice(0, 1897) + "..." : text;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+async function askGemini(question, history = [], persona = "") {
+  if (!config.geminiApiKey) return askOpenRouter(question, history, persona);
+  if (Date.now() < geminiQuotaCooldownUntil) {
+    if (config.openRouterApiKey) return askOpenRouter(question, history, persona);
+    throw new Error("Gemini quota limit reached. Please try again after the cooldown.");
+  }
+  const models = ["gemini-3.8-flash", "gemini-3.5-flash-lite"];
+  let geminiError = null;
+  for (let i = 0; i < models.length; i++) {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 20000);
+    try {
+      const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${models[i]}:generateContent`, {
+        method: "POST",
+        signal: controller.signal,
+        headers: {
+          "Content-Type": "application/json",
+          "x-goog-api-key": config.geminiApiKey,
+        },
+        body: JSON.stringify({
+          systemInstruction: { parts: [{ text: aiSystemInstruction(persona) }] },
+          contents: [...history, { role: "user", parts: [{ text: question }] }],
+          generationConfig: { maxOutputTokens: 1024 },
+        }),
+      });
+      const data = await response.json().catch(() => null);
+      if (!response.ok) {
+        const detail = data?.error?.message;
+        const error = new Error(`Gemini request failed (HTTP ${response.status})${detail ? `: ${detail.slice(0, 500)}` : ""}`);
+        error.status = response.status;
+        throw error;
+      }
+      const answer = data?.candidates?.[0]?.content?.parts
+        ?.map((part) => part.text || "")
+        .join("")
+        .trim();
+      if (!answer) throw new Error("Gemini returned no answer. Try rephrasing your question.");
+      return answer.length > 1900 ? answer.slice(0, 1897) + "..." : answer;
+    } catch (error) {
+      geminiError = error;
+      if (error?.status === 429) {
+        geminiQuotaCooldownUntil = Date.now() + GEMINI_QUOTA_COOLDOWN_MS;
+        logPretty("WARN", "Gemini returned HTTP 429; pausing Gemini requests for 15 minutes");
+        break;
+      }
+      if (i === 0 && [500, 502, 503, 504].includes(error?.status)) {
+        logPretty("WARN", `Gemini ${models[i]} unavailable (HTTP ${error.status}); trying ${models[i + 1]}`);
+        continue;
+      }
+      break;
+    } finally {
+      clearTimeout(timeout);
+    }
+  }
+  if (config.openRouterApiKey) {
+    logPretty("WARN", `Gemini unavailable; falling back to OpenRouter (${config.openRouterModel})`);
+    return askOpenRouter(question, history, persona);
+  }
+  throw geminiError || new Error("Gemini request failed. Please try again later.");
+}
 function aiHistoryPath() { return path.join(config.dataDir, "ai-chat-history.json"); }
 function aiPersonasPath() { return path.join(config.dataDir, "ai-chat-personas.json"); }
+function loadAiHistories() {
+  try {
+    const data = JSON.parse(fs.readFileSync(aiHistoryPath(), "utf8"));
+    return data && typeof data === "object" && !Array.isArray(data) ? data : {};
+  } catch { return {}; }
+}
+function loadAiPersonas() {
+  try {
+    const data = JSON.parse(fs.readFileSync(aiPersonasPath(), "utf8"));
+    return data && typeof data === "object" && !Array.isArray(data) ? data : {};
+  } catch { return {}; }
+}
+function saveAiPersonas(personas) {
+  try {
+    fs.mkdirSync(config.dataDir, { recursive: true });
+    fs.writeFileSync(aiPersonasPath(), JSON.stringify(personas), "utf8");
+  } catch (error) {
+    logPretty("WARN", "Could not persist AI chat personas: " + (error?.message || error));
+  }
+}
+function getAiPersona(sessionKey) {
+  const persona = loadAiPersonas()[sessionKey];
+  return typeof persona === "string" ? persona : "";
+}
+function setAiPersona(sessionKey, persona) {
+  const personas = loadAiPersonas();
+  if (persona) personas[sessionKey] = persona;
+  else delete personas[sessionKey];
+  saveAiPersonas(personas);
+}
+function saveAiHistories(histories) {
+  try {
+    fs.mkdirSync(config.dataDir, { recursive: true });
+    fs.writeFileSync(aiHistoryPath(), JSON.stringify(histories), "utf8");
+  } catch (error) {
+    logPretty("WARN", "Could not persist AI chat history: " + (error?.message || error));
+  }
+}
+async function askGeminiWithHistory(question, sessionKey) {
+  const histories = loadAiHistories();
+  const previous = Array.isArray(histories[sessionKey])
+    ? histories[sessionKey].filter((entry) =>
+      ["user", "model"].includes(entry?.role) && Array.isArray(entry.parts) && entry.parts.every((part) => typeof part?.text === "string"))
+    : [];
+  const answer = await askGemini(question, previous, getAiPersona(sessionKey));
+  histories[sessionKey] = [...previous, { role: "user", parts: [{ text: question }] }, { role: "model", parts: [{ text: answer }] }].slice(-20);
+  saveAiHistories(histories);
+  return answer;
+}
+async function clearGuildAiChats(guildId) {
+  const histories = loadAiHistories();
+  let clearedHistories = 0;
+  for (const key of Object.keys(histories)) {
+    if (key === `slash:${guildId}` || key.startsWith(`slash:${guildId}:`) || key.startsWith(`channel:${guildId}:`)) {
+      delete histories[key];
+      clearedHistories++;
+    }
+  }
+  saveAiHistories(histories);
+  const personas = loadAiPersonas();
+  for (const key of Object.keys(personas)) {
+    if (key === `slash:${guildId}` || key.startsWith(`slash:${guildId}:`) || key.startsWith(`channel:${guildId}:`) || key.startsWith(`private:${guildId}:`)) delete personas[key];
+  }
+  saveAiPersonas(personas);
 
-
-
-
-
-
-
-
+  let closedPrivateChats = 0;
+  for (const [threadId, session] of privateAiSessions) {
+    if (session.guildId !== guildId) continue;
+    privateAiSessions.delete(threadId);
+    aiChatBusy.delete(`private:${threadId}`);
+    try { await session.thread.delete("AI chats cleared by a server admin"); } catch { }
+    closedPrivateChats++;
+  }
+  return { clearedHistories, closedPrivateChats };
+}
 const API_URL = 'https://www.tikwm.com/api/';
-
+function isTikTokUrl(s) {
+  return typeof s === "string" && (s.includes("tiktok.com") || s.includes("vt.tiktok.com"));
+}
 // Fetch ONLY song metadata + stream link from TikWM.
-
-
-
+async function tiktokMeta(pageUrl, retries = 1) {
+  try {
+    return await tiktokMetaOnce(pageUrl);
+  } catch (e) {
+    // TikWM free tier: 1 request/second — wait and retry once.
+    if (retries > 0 && /1 request\/second|429|rate/i.test(String(e?.message || e))) {
+      await new Promise((r) => setTimeout(r, 1300));
+      return await tiktokMetaOnce(pageUrl);
+    }
+    throw e;
+  }
+}
+async function tiktokMetaOnce(pageUrl) {
+  const data = await fetchJsonWithTimeout(API_URL + '?url=' + encodeURIComponent(pageUrl), 12000);
+  const d = data && data.data;
+  if (!d) throw new Error('tikwm: ' + ((data && data.msg) || 'bad response'));
+  const music = typeof d.music === "string" ? d.music
+    : (d.music && (d.music.play || d.music.url)) || (d.music_info && (d.music_info.play || d.music_info.url));
+  if (!music) throw new Error('tikwm: no audio stream in response');
+  const title = d.title || (d.music_info && d.music_info.title) || pageUrl;
+  const thumb = d.cover || d.origin_cover || d.ai_dynamic_cover || null;
+  const author = (d.author && (d.author.nickname || d.author.unique_id)) || null;
+  return { title: String(title), thumb, audioUrl: String(music), duration: d.duration || null, author };
+}
+function tiktokHeaders() {
+  return "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36\r\n"
+    + "Referer: https://www.tiktok.com/\r\n";
+}
 // --- end TikTok support ---
 
 /* Clamp negative or invalid timer delays to 1 ms to avoid TimeoutNegativeWarning. */
@@ -137,7 +352,81 @@ const config = {
 // values such as the bot token are not printed directly; instead we indicate
 // whether they are set. This runs immediately so users can verify their
 // `.env` settings when starting the bot.
-
+function logConfiguration() {
+  const entries = [
+    { key: "port", env: "PORT" },
+    { key: "token", env: "TOKEN", mask: true },
+    { key: "geminiApiKey", env: "GEMINI_API_KEY", mask: true },
+    { key: "openRouterApiKey", env: "OPENROUTER_API_KEY", mask: true },
+    { key: "openRouterModel", env: "OPENROUTER_MODEL" },
+    { key: "ffmpegPath", env: "FFMPEG_PATH" },
+    { key: "cookieFile", env: "YTDLP_COOKIES_PATH" },
+    { key: "logDir", env: "LOG_DIR" },
+    { key: "dataDir", env: "DATA_DIR" },
+    { key: "debugFfmpeg", env: "DEBUG_FFMPEG" },
+    { key: "defaultVolume", env: "DEFAULT_VOLUME" },
+    { key: "defaultLoop", env: "DEFAULT_LOOP_MODE" },
+    { key: "timezoneOffsetHours", env: "TIMEZONE_OFFSET_HOURS" },
+    { key: "ytdlpForceIpv4", env: "YTDLP_FORCE_IPV4" },
+    { key: "ytdlpAutoUpdate", env: "YTDLP_AUTO_UPDATE" },
+    { key: "audioChannels", env: "AUDIO_CHANNELS" },
+    { key: "audioSampleRate", env: "AUDIO_SAMPLE_RATE" },
+    { key: "opusBitrate", env: "OPUS_BITRATE" },
+    { key: "opusVbr", env: "OPUS_VBR" },
+    { key: "opusApplication", env: "OPUS_APPLICATION" },
+    { key: "opusFrameDuration", env: "OPUS_FRAME_DURATION" },
+    { key: "opusComplexity", env: "OPUS_COMPLEXITY" },
+    { key: "audioFilter", env: "AUDIO_FILTER" },
+    { key: "ffmpegLowLatency", env: "FFMPEG_LOW_LATENCY" },
+    { key: "ffmpegInputAnalyzeMs", env: "FFMPEG_INPUT_ANALYZE_MS" },
+    { key: "ffmpegReconnectDelayMax", env: "FFMPEG_RECONNECT_DELAY_MAX" },
+    { key: "ffmpegExtraArgs", env: "FFMPEG_EXTRA_ARGS" },
+    { key: "dashboardUser", env: "DASHBOARD_USER" },
+    { key: "dashboardPassword", env: "DASHBOARD_PASSWORD", mask: true },
+    { key: "disconnectDelaySec", env: "DISCONNECT_DELAY_SEC" },
+    { key: "ytdlpPlayerClient", env: "YTDLP_PLAYER_CLIENT" },
+    { key: "prebufferKB", env: "PREBUFFER_KB" },
+    { key: "prebufferWaitMs", env: "PREBUFFER_WAIT_MS" },
+  ];
+  // We want to simulate loading the .env file by printing a message
+  // and waiting a short time before outputting the configuration.  Using
+  // an Atomics.wait call lets us block synchronously without complicating
+  // the asynchronous flow elsewhere in the program.  This approach
+  // guarantees that the loading message appears before the variables
+  // themselves, and avoids interleaving logs due to unresolved promises.
+  console.log("--------------------------------");
+  // Thai text explains the wait – it will show up in the console to
+  // indicate a brief pause while reading the .env file.
+  console.log(
+    "[BOT] loading .env"
+  );
+  console.log("--------------------------------");
+  // Block for 1000ms to simulate reading the .env file
+  try {
+    const sab = new SharedArrayBuffer(4);
+    const ia = new Int32Array(sab);
+    // Atomics.wait returns 'timed-out' when the timeout expires
+    Atomics.wait(ia, 0, 0, 1000);
+  } catch {
+    // Fall back to a non-blocking setTimeout if Atomics.wait is unavailable
+    const end = Date.now() + 1000;
+    while (Date.now() < end) {
+      // busy loop
+    }
+  }
+  for (const entry of entries) {
+    const used = config[entry.key];
+    let displayValue;
+    if (entry.mask) {
+      displayValue = used ? "[set]" : "[not set]";
+    } else {
+      displayValue = used;
+    }
+    // Print in the form "<ENV_NAME>:<value>" with a single leading space
+    console.log(` ${entry.env}:${displayValue}`);
+    console.log("--------------------------------");
+  }
+}
 // Invoke the configuration logger early so users see settings on startup
 logConfiguration();
 console.log("[BOT] Starting now");
@@ -268,15 +557,39 @@ const C = {
 const R = C.reset;
 
 // ─── Timestamp ───────────────────────────────────────────────────────────────
-
-
+function nowStr() {
+  const d = new Date();
+  const pad = (n) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} `
+    + `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+}
+function nowStrShort() {
+  const d = new Date();
+  const pad = (n) => String(n).padStart(2, "0");
+  return `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+}
 
 // ─── WS ping helper ──────────────────────────────────────────────────────────
 let _clientForPing = null;
-
+function wsPing() {
+  try { return Math.round(_clientForPing?.ws?.ping || 0); } catch { return 0; }
+}
 
 // ─── File logger (plain text, no ANSI) ───────────────────────────────────────
+function writeLog(plain, isDebug = false, type = "") {
+  // bot-debug.log — always receives everything (incl. ffmpeg)
+  try { fs.appendFileSync(LOG_FILE_DEBUG, plain + "\n", "utf8"); } catch { }
 
+  // bot-error.log — ERROR and WARN only
+  if (type === "ERROR" || type === "WARN") {
+    try { fs.appendFileSync(LOG_FILE_ERROR, plain + "\n", "utf8"); } catch { }
+  }
+
+  // bot.log — everything except ffmpeg debug
+  if (!isDebug) {
+    try { fs.appendFileSync(LOG_FILE_MAIN, plain + "\n", "utf8"); } catch { }
+  }
+}
 
 // ─── Log type config ─────────────────────────────────────────────────────────
 //  Each entry: { icon, label, labelColor, bgColor }
@@ -342,11 +655,25 @@ function logPretty(type, msg, extra = {}) {
     console.log(line);
   }
 }
-
+function swallowPipeError(err) {
+  const msg = String(err?.message || err || "");
+  if (msg.includes("EPIPE") || msg.includes("ERR_STREAM_DESTROYED") || msg.includes("Premature close")) return;
+  logPretty("ERROR", "pipe error: " + msg);
+}
 // Use the configured debug flag for ffmpeg logging
 const DEBUG_FFMPEG = config.debugFfmpeg;
 
-
+function checkFfmpegAvailability() {
+  if (FFMPEG_AVAILABLE) return;
+  try {
+    const res = spawnSync("ffmpeg", ["-version"], { stdio: "ignore" });
+    if (!res.error && res.status === 0) {
+      FFMPEG_AVAILABLE = true;
+      return;
+    }
+  } catch { }
+  logPretty("ERROR", "ffmpeg binary not found. Please install ffmpeg or add it to PATH.");
+}
 
 checkFfmpegAvailability();
 
@@ -357,15 +684,45 @@ const UPDATE_MARK_FILE = path.join(DATA_DIR, "yt-dlp.last");
 // Calculate timezone offset in milliseconds based on configuration (hours → ms)
 const BKK_OFFSET_MS = config.timezoneOffsetHours * 60 * 60 * 1000;
 let isUpdatingYtDlp = false;
-
-
-
-
-
+function readLastUpdateTs() { try { return Number(fs.readFileSync(UPDATE_MARK_FILE, "utf8")); } catch { return 0; } }
+function writeLastUpdateTs(ts = Date.now()) { try { fs.writeFileSync(UPDATE_MARK_FILE, String(ts), "utf8"); } catch { } }
+async function runYtDlpUpdate(replyFn) {
+  if (isUpdatingYtDlp) { replyFn?.("⏳ Update already in progress"); return; }
+  isUpdatingYtDlp = true;
+  const started = Date.now();
+  try {
+    try { await ytdlp("--version"); } catch { }
+    const out = await ytdlp("-U").catch(err => ({ error: err }));
+    if (out?.error) {
+      logPretty("ERROR", `yt-dlp update failed: ${out.error.message || out.error}`);
+      replyFn?.("❌ Update failed");
+    } else {
+      const stdout = typeof out === "string" ? out : (out?.stdout || "");
+      logPretty("SYSTEM", `yt-dlp updated  ${stdout.toString().trim().split("\n").pop()}`);
+      writeLastUpdateTs(started);
+      replyFn?.("✅ Update finished");
+    }
+  } finally { isUpdatingYtDlp = false; }
+}
+function msUntilNextBangkokMidnight() {
+  const now = new Date();
+  const bkkNow = new Date(now.getTime() + BKK_OFFSET_MS);
+  const nextMidnightBkkUTCms = Date.UTC(bkkNow.getUTCFullYear(), bkkNow.getUTCMonth(), bkkNow.getUTCDate() + 1, 0, 0, 0) - BKK_OFFSET_MS;
+  return Math.max(1, nextMidnightBkkUTCms - now.getTime());
+}
+function scheduleDailyBangkokMidnight(fn) {
+  const delay = msUntilNextBangkokMidnight();
+  setTimeout(async () => {
+    try {
+      await fn();
+    } finally {
+      scheduleDailyBangkokMidnight(fn);
+    }
+  }, delay);
+}
 
 // Discord client
 const client = new Client({
-  shards: "auto",
   intents: [
     GatewayIntentBits.Guilds,
     GatewayIntentBits.GuildVoiceStates,
@@ -376,14 +733,62 @@ const client = new Client({
 _clientForPing = client;
 
 // --- Prefix commands (e.g., n!play ...) ---
+const BOT_PREFIX = (process.env.BOT_PREFIX || process.env.COMMAND_PREFIX || "n!").trim();
 // NOTE: avoid process.env.PREFIX because Termux sets PREFIX=/data/... by default.
 
 // ================= Discord UI (buttons + YouTube sign-in) =================
-
-
-
-
-
+function ytCookiesPath() {
+  return config.cookieFile || path.join(config.dataDir, "cookies.txt");
+}
+function ytCookiesStatus() {
+  const p = ytCookiesPath();
+  try {
+    const st = fs.statSync(p);
+    return { path: p, exists: true, size: st.size, mtime: st.mtime.toISOString() };
+  } catch { return { path: p, exists: false, size: 0, mtime: null }; }
+}
+function saveYTCookies(text) {
+  const t = String(text || "").trim();
+  if (!t || t.length < 100) throw new Error("cookies too short — paste full cookies.txt");
+  if (!t.includes("youtube.com") && !t.includes("youtu.be")) throw new Error("no youtube.com entries found");
+  // Must look like a Netscape cookies file, or yt-dlp rejects EVERYTHING.
+  const lines = t.split("\n").filter((l) => l && !l.trim().startsWith("#"));
+  if (!lines.length || !lines.some((l) => l.includes("\t"))) {
+    throw new Error("not a Netscape cookies.txt (need tab-separated lines — export with 'Get cookies.txt LOCALLY', don't paste JSON)");
+  }
+  const target = ytCookiesPath();
+  fs.mkdirSync(path.dirname(target), { recursive: true });
+  fs.writeFileSync(target, t.replace(/\r\n/g, "\n"), "utf8");
+  config.cookieFile = target; // live, no restart
+  logPretty("SYSTEM", `YouTube cookies updated via Discord (${t.length} chars -> ${target})`);
+  return target;
+}
+function isGuildAdmin(member) {
+  try {
+    if (!member) return false;
+    if (member.id === member.guild?.ownerId) return true;
+    return member.permissions?.has?.(PermissionFlagsBits.ManageGuild);
+  } catch { return false; }
+}
+function buildTransportRows(state = null) {
+  const paused = state?.player?.state?.status === AudioPlayerStatus.Paused;
+  const r1 = new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId("mus_prev").setLabel("Prev").setEmoji("⏮").setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder().setCustomId("mus_resume").setLabel(paused ? "Play" : "Pause").setEmoji(paused ? "▶" : "⏸").setStyle(paused ? ButtonStyle.Success : ButtonStyle.Secondary),
+    new ButtonBuilder().setCustomId("mus_skip").setLabel("Skip").setEmoji("⏭").setStyle(ButtonStyle.Primary),
+    new ButtonBuilder().setCustomId("mus_stop").setLabel("Stop").setEmoji("⏹").setStyle(ButtonStyle.Danger),
+    new ButtonBuilder().setCustomId("mus_queue").setLabel("List").setEmoji("📋").setStyle(ButtonStyle.Secondary),
+  );
+  const lyricsOn = state ? state.showLyrics !== false : true;
+  const r2 = new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId("mus_loop").setLabel(`Loop: ${state ? loopLabel(state.loopMode).replace(/^[^\s]+\s/, "") : "Off"}`).setEmoji("🔁").setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder().setCustomId("mus_speed").setLabel(`Speed: ${state && Number(state.speed) ? state.speed : 1}x`).setEmoji("⏩").setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder().setCustomId("mus_lyrics").setLabel(`Lyrics: ${lyricsOn ? "On" : "Off"}`).setEmoji("📝").setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder().setCustomId("mus_volup").setLabel("Vol +").setEmoji("🔊").setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder().setCustomId("mus_voldown").setLabel("Vol −").setEmoji("🔉").setStyle(ButtonStyle.Secondary),
+  );
+  return [r1, r2];
+}
 // Setup is done once the guild has both bocchi rooms (text + saved voice).
 function isBocchiSetup(state) {
   const guild = state?.guildId ? client.guilds.cache.get(state.guildId) : null;
@@ -394,9 +799,47 @@ function isBocchiSetup(state) {
 }
 // Settings row: always visible so a hidden-controls panel can be reopened.
 // The /setup button hides itself once the bocchi rooms already exist.
-
-
-
+function buildSettingsRow(state = null) {
+  const shown = !state || state.showControls !== false;
+  const row = new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId("mus_controls").setLabel(`Controls: ${shown ? "Show" : "Hidden"}`).setEmoji("🎛").setStyle(ButtonStyle.Secondary),
+  );
+  if (!isBocchiSetup(state)) {
+    row.addComponents(new ButtonBuilder().setCustomId("mus_setup").setLabel("/setup").setEmoji("🛠").setStyle(ButtonStyle.Secondary));
+  }
+  return row;
+}
+function buildControlRows(state = null) {
+  const rows = [];
+  const [r1, r2] = buildTransportRows(state);
+  rows.push(r1);
+  if (!state || state.showControls !== false) rows.push(r2);
+  rows.push(buildSettingsRow(state));
+  return rows;
+}
+function buildPanelEmbed(guild) {
+  const st = getGuildState(guild);
+  const cur = st.current ? `**${st.current.title}**\n👤 ${st.current.requestedBy}` : "— idle —\nuse `/play` or `n!play` to add songs";
+  const next = st.queue.slice(0, 3).map((x, i) => `\`${i + 1}.\` ${x.title}`).join("\n") || "—";
+  const ck = ytCookiesStatus();
+  const room = getSavedControlChannel(guild.id) ? `<#${getSavedControlChannel(guild.id)}>` : "#bocchi (auto)";
+  const panel = new EmbedBuilder().setColor(0x5865F2).setTitle("🎛 Music Panel — Settings")
+    .setDescription("Press the buttons — you must share a voice channel with the bot\nAll bot messages live in " + room)
+    .addFields(
+      { name: "🎵 Now", value: cur, inline: false },
+      { name: "📋 Next", value: next, inline: false },
+      { name: "🔊 Volume", value: `${st.volumePct}%`, inline: true },
+      { name: "🔁 Loop", value: loopLabel(st.loopMode), inline: true },
+      { name: "⏩ Speed", value: `${Number(st.speed) || 1}x`, inline: true },
+      { name: "📝 Lyrics", value: st.showLyrics !== false ? "On" : "Off", inline: true },
+      { name: "🎛 Controls", value: st.showControls !== false ? "Show" : "Hidden", inline: true },
+      { name: " Room", value: room, inline: true },
+      { name: "🍪 YouTube", value: ck.exists ? `✅ signed in (${ck.size}b)` : "❌ not signed — admin, use `/ytsignin`", inline: true },
+    ).setTimestamp();
+  const pt = st.current ? (st.current.thumb || thumbFor(st.current.source)) : null;
+  if (pt) panel.setThumbnail(pt);
+  return panel;
+}
 // /setup in one place (slash, prefix, panel button): voice room "bocchi" +
 // text room #bocchi (created when missing), then post the living panel there.
 async function runBocchiSetup(guild) {
@@ -541,8 +984,138 @@ async function handleMusicButton(itx) {
   return itx.reply({ content: "?", flags: MessageFlags.Ephemeral });
 }
 
+function buildHelpEmbedPrefix() {
+  const p = BOT_PREFIX;
+  return new EmbedBuilder()
+    .setColor(0x5865F2)
+    .setTitle("🎵 Music Bot — User Guide")
+    .setDescription(`> Use prefix commands **\`${p}\`** Example: \`${p}play lofi hip hop\`\n> Supports **YouTube · SoundCloud · TikTok · Spotify** (track)`)
+    .addFields(
+      {
+        name: "╔══════════════════════════╗",
+        value: "** ** ",
+        inline: false,
+      },
+      {
+        name: "🎶 Play & queue",
+        value: [
+          `\`${p}play <name/URL>\` — Play or queue a song`,
+          `\`${p}playlist <URL/search> --limit N\` — Load songs in bulk`,
+          `\`${p}queue\` — Show the full queue`,
+          `\`${p}np\` — Currently playing song`,
+          `\`${p}remove <number>\` — Remove from queue`,
+          `\`${p}shuffle\` — Shuffle the queue`,
+        ].join("\n"),
+        inline: false,
+      },
+      {
+        name: "⏯️ Playback",
+        value: [
+          `\`${p}skip\` — Skip the current song`,
+          `\`${p}pause\` — Pause`,
+          `\`${p}resume\` — Resume`,
+          `\`${p}stop\` — Stop and clear the whole queue`,
+        ].join("\n"),
+        inline: true,
+      },
+      {
+        name: "🔊 Volume & loop",
+        value: [
+          `\`${p}volume <0-10000>\` — Adjust the volume`,
+          `\`${p}loop off\` — Loop off`,
+          `\`${p}loop track\` — Loop the current track`,
+          `\`${p}loop queue\` — Loop the whole queue`,
+        ].join("\n"),
+        inline: true,
+      },
+      {
+        name: "⚙️ System",
+        value: [
+          `\`${p}ping\` — Check latency`,
+          `\`${p}botupdate\` — Update yt-dlp`,
+          `\`${p}help\` — Show this guide`,
+        ].join("\n"),
+        inline: false,
+      },
+      {
+        name: "╚══════════════════════════╝",
+        value: "** **",
+        inline: false,
+      },
+    )
+    .setFooter({ text: "💡 Shortcut: n!p = play · n!q = queue · n!s = skip · n!h = help", iconURL: "https://cdn.discordapp.com/emojis/1009293917116919808.webp" })
+    .setTimestamp();
+}
 
-
+function buildHelpEmbedSlash() {
+  return new EmbedBuilder()
+    .setColor(0x5865F2)
+    .setTitle("🎵 Music Bot — User Guide")
+    .setDescription("> Just use **Slash** `/` commands\n> Supports **YouTube · SoundCloud · TikTok · Spotify** (track)")
+    .addFields(
+      {
+        name: "╔══════════════════════════╗",
+        value: "** **",
+        inline: false,
+      },
+      {
+        name: "🎶 Play & queue",
+        value: [
+          "`/play query:<name/URL>` — Play or queue a song",
+          "`/playlist query:<URL/search> limit:<N>` — Load songs in bulk",
+          "`/queue` — Show the full queue",
+          "`/np` — Currently playing song",
+          "`/remove index:<number>` — Remove from queue",
+          "`/shuffle` — Shuffle the queue",
+        ].join("\n"),
+        inline: false,
+      },
+      {
+        name: "⏯️ Playback",
+        value: [
+          "`/skip` — Skip the current song",
+          "`/pause` — Pause",
+          "`/resume` — Resume",
+          "`/stop` — Stop and clear the whole queue",
+        ].join("\n"),
+        inline: true,
+      },
+      {
+        name: "🔊 Volume & loop",
+        value: [
+          "`/volume value:<0-10000>` — Adjust the volume",
+          "`/loop mode:off` — Loop off",
+          "`/loop mode:track` — Loop the current track",
+          "`/loop mode:queue` — Loop the whole queue",
+        ].join("\n"),
+        inline: true,
+      },
+      {
+        name: "⚙️ System",
+        value: [
+          "`/ping` — Check latency",
+          "`/ai question:<text>` — Ask Gemini a question",
+          "`/airef` — Set this chat's AI persona (omit persona to use Ref/Ai_Tsun.txt)",
+          "`/setaip` — Open a private AI chat",
+          "`/delete` — Delete your private AI chat",
+          "`/deletep confirm:true` — Delete all messages in public AI chat (Manage Messages)",
+          "`/clear` — Clear this server's AI history (Manage Channels)",
+          "`/setai` — Create a public AI chat channel (Manage Channels)",
+          "`/setup` — Create or reuse the music control room (Manage Server)",
+          "`/botupdate` — Update yt-dlp",
+          "`/help` — Show this guide",
+        ].join("\n"),
+        inline: false,
+      },
+      {
+        name: "╚══════════════════════════╝",
+        value: "** **",
+        inline: false,
+      },
+    )
+    .setFooter({ text: "💡 Tip: prefix commands via n!help are faster!" })
+    .setTimestamp();
+}
 
 function parseLimitFromArgs(tokens) {
   let limit = null;
@@ -561,22 +1134,65 @@ function parseLimitFromArgs(tokens) {
 }
 
 // ─── Embed helper functions ────────────────────────────────────────────────
+const COLORS = {
+  primary: 0x5865F2, // Discord Blurple
+  success: 0x57F287, // Green
+  warning: 0xFEE75C, // Yellow
+  error: 0xED4245, // Red
+  info: 0x5DADE2, // Blue
+  music: 0xE91E63, // Pink/Music
+  queue: 0x9B59B6, // Purple
+};
 
+function makeEmbed(color = COLORS.primary) {
+  return new EmbedBuilder().setColor(color).setTimestamp();
+}
 
+function successEmbed(title, description) {
+  return makeEmbed(COLORS.success)
+    .setDescription(`### ${title}\n${description ? `${description}` : ""}`);
+}
 
+function errorEmbed(description) {
+  return makeEmbed(COLORS.error)
+    .setDescription(`### ❌ Error\n${description}`);
+}
 
+function infoEmbed(title, description) {
+  return makeEmbed(COLORS.info)
+    .setDescription(`### ${title}\n${description ? `${description}` : ""}`);
+}
 
+function musicEmbed(title, description) {
+  return makeEmbed(COLORS.music)
+    .setDescription(`### ${title}\n${description ? `${description}` : ""}`);
+}
 
-
-
-
-
-
-
-
+function loopLabel(mode) {
+  if (mode === "track") return "🔂 Loop current";
+  if (mode === "queue") return "🔁 Loop whole queue";
+  return "➡️ Off";
+}
+function shuffleArray(arr) {
+  for (let i = arr.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [arr[i], arr[j]] = [arr[j], arr[i]];
+  }
+  return arr;
+}
 // ---- Clean + dynamic Now Playing UI ----
-
-
+function cleanTitle(t, max = 90) {
+  let s = String(t ?? "Unknown").split("\n")[0].trim();
+  s = s.replace(/(\s*#[^\s#]+)+\s*$/, "").trim(); // strip trailing hashtag run
+  if (s.length > max) s = s.slice(0, max - 1).trim() + "…";
+  return s || "Unknown";
+}
+function fmtTime(sec) {
+  if (!Number.isFinite(sec) || sec < 0) return "• LIVE";
+  sec = Math.floor(sec);
+  const m = Math.floor(sec / 60), s = sec % 60;
+  return `${m}:${String(s).padStart(2, "0")}`;
+}
 function playbackSeconds(state) {
   const isPaused = state.player?.state?.status === AudioPlayerStatus.Paused && state.pausedAt;
   const referenceTime = isPaused ? state.pausedAt : Date.now();
@@ -601,17 +1217,124 @@ function progressLine(state) {
 // Lyrics via LRCLIB (free, no key). Cached per title. Returns plain text plus
 // timestamped `synced` lines for karaoke scrolling, or null when missing.
 const lyricCache = new Map();
-
-
-
+function parseSyncedLyrics(synced) {
+  const out = [];
+  for (const rawLine of String(synced || "").split(/\r?\n/)) {
+    const m = rawLine.match(/^\s*\[(\d+):(\d+(?:\.\d+)?)\]\s*(.*)$/);
+    if (!m) continue;
+    const t = Number(m[1]) * 60 + Number(m[2]);
+    const text = (m[3] || "").trim().slice(0, 160);
+    if (!Number.isFinite(t) || t < 0 || !text) continue;
+    out.push({ t, text });
+    if (out.length >= 400) break;
+  }
+  out.sort((a, b) => a.t - b.t);
+  return out;
+}
+function lyricIndexAt(synced, elapsedSec) {
+  let idx = -1;
+  for (let i = 0; i < synced.length; i++) {
+    if (synced[i].t <= elapsedSec + 0.25) idx = i;
+    else break;
+  }
+  return idx;
+}
+async function fetchLyrics(title) {
+  const key = String(title || "").slice(0, 80).toLowerCase().trim();
+  if (!key || key.length < 3) return null;
+  if (lyricCache.has(key)) return lyricCache.get(key);
+  const p = (async () => {
+    try {
+      const q = encodeURIComponent(cleanTitle(title, 80));
+      const s = await fetchJsonWithTimeout(`https://lrclib.net/api/search?q=${q}`, 7000);
+      const arr = Array.isArray(s) ? s : [];
+      const best = arr.find((x) => x && x.syncedLyrics) || arr.find((x) => x && x.plainLyrics) || null;
+      if (!best) return null;
+      const synced = parseSyncedLyrics(best.syncedLyrics);
+      let text = String(best.plainLyrics || "").trim();
+      if (!text && best.syncedLyrics) text = String(best.syncedLyrics).replace(/^\[\d+:\d+\.\d+\]\s*/gm, "").trim();
+      if (!text) return null;
+      if (/^\[?instrumental\]?$/i.test(text)) return { text: "🎵 Instrumental", synced: [], artist: best.artistName || null, name: best.trackName || null };
+      if (text.length < 20) return null;
+      if (text.length > 900) text = text.slice(0, 900).trim() + "…";
+      return { text, synced, artist: best.artistName || null, name: best.trackName || null };
+    } catch { return null; }
+  })();
+  lyricCache.set(key, p);
+  if (lyricCache.size > 200) { try { lyricCache.delete(lyricCache.keys().next().value); } catch {} }
+  return p;
+}
 // Spotify-style karaoke block: a scrolling window of lines around the current
 // position — sung lines dimmed, the live line highlighted, upcoming lines plain.
 // Driven by track position so the window auto-scrolls as the song plays.
-
+function karaokeField(state, lyrics, estimated = false) {
+  const el = playbackSeconds(state);
+  const synced = lyrics.synced;
+  const idx = lyricIndexAt(synced, el);
+  const PAST = 2, FUTURE = 4;
+  const rows = [];
+  if (idx < 0) {
+    rows.push("*♪ Intro — get ready…*");
+    for (let i = 0; i < Math.min(FUTURE + 1, synced.length); i++) rows.push(`　${synced[i].text}`);
+  } else {
+    const start = Math.max(0, idx - PAST);
+    for (let i = start; i < idx; i++) rows.push(`╰╴${synced[i].text}`);
+    rows.push(`**🎤▶ ${synced[idx].text}**`);
+    for (let i = idx + 1; i < synced.length && rows.length < PAST + 1 + FUTURE; i++) rows.push(`　${synced[i].text}`);
+    if (idx >= synced.length - 1) rows.push("*♪ Outro…*");
+  }
+  let value = rows.join("\n");
+  if (value.length > 1000) value = value.slice(0, 997).trimEnd() + "…";
+  const by = lyrics.artist ? ` · ${lyrics.artist}` : "";
+  const est = estimated ? " · ~timing estimated" : "";
+  return { name: `🎤 Karaoke — sing along${by}${est}`, value: `​\n${value}\n​`, inline: false };
+}
 // No synced LRC available? Spread the plain lines evenly over the track so the
 // karaoke highlight still scrolls (clearly labelled as estimated).
-
-
+function estimateSyncedLyrics(text, durationSec) {
+  const lines = String(text).split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+  if (lines.length < 2 || lines.length > 200) return [];
+  const start = Math.max(5, durationSec * 0.06);
+  const end = durationSec * 0.97;
+  const step = (end - start) / lines.length;
+  return lines.map((line, i) => ({ t: start + i * step, text: line.slice(0, 160) }));
+}
+function buildNowPlayingEmbed(state, lyrics) {
+  const cur = state.current;
+  const dur = cur?.durationSec;
+  const scrollingTitle = marqueeText(cleanTitle(cur?.title, 180), playbackSeconds(state));
+  const e = makeEmbed(COLORS.music)
+    .setTitle("🎶 Now Playing")
+    .setDescription(`**${scrollingTitle}**${Number.isFinite(dur) && dur > 0 ? ` — ${fmtTime(dur)}` : ""}\n${progressLine(state)}`)
+    .addFields(
+      { name: "👤 Requested by", value: `${cur?.requestedBy || "—"}`, inline: true },
+      { name: "🔊 Volume", value: `${state.volumePct}%`, inline: true },
+      { name: "🔁 Loop", value: loopLabel(state.loopMode), inline: true },
+    )
+    .setFooter({ text: `Speed ${Number(state.speed) || 1}x · Use the controls below` })
+    .setTimestamp();
+  if (cur?.source && isUrl(cur.source)) e.setURL(cur.source);
+  const t = cur ? (cur.thumb || thumbFor(cur.source)) : null;
+  if (t) e.setThumbnail(t);
+  if (lyrics && lyrics.text) {
+    let synced = Array.isArray(lyrics.synced) ? lyrics.synced : [];
+    let estimated = false;
+    if (!synced.length && Number.isFinite(dur) && dur > 30 && !/^🎵/.test(lyrics.text)) {
+      synced = estimateSyncedLyrics(lyrics.text, dur);
+      estimated = synced.length > 0;
+    }
+    if (state.showLyrics !== false && synced.length) {
+      e.addFields(karaokeField(state, { ...lyrics, synced }, estimated));
+    } else {
+      const lines = lyrics.text.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+      let preview = lines.slice(0, 4).join("\n");
+      if (preview.length > 280) preview = preview.slice(0, 277).trimEnd() + "...";
+      else if (lines.length > 4) preview += "\n…";
+      e.addFields({ name: `📝 Lyrics preview${lyrics.artist ? ` · ${lyrics.artist}` : ""}`, value: preview, inline: false });
+    }
+  }
+  return e;
+}
 function stopNowPlayingTicker(state) {
   if (state.npRefreshTimer) clearInterval(state.npRefreshTimer);
   state.npRefreshTimer = null;
@@ -811,12 +1534,12 @@ async function runDmMusicCommand(msg, guild, cmd, parts) {
     return reply({ content: `Music controls are in <#${ref.channelId}> (server **${guild.name}**).` });
   }
   if (cmd === "np") {
-    if (!state.current) return reply({ embeds: [infoEmbed("🎵 Nothing playing", `Use \`/play <song>\` to start`)] });
+    if (!state.current) return reply({ embeds: [infoEmbed("🎵 Nothing playing", `Use \`${BOT_PREFIX}play <song>\` to start`)] });
     const lyrNp = await fetchLyrics(state.current.title).catch(() => null);
     return reply({ embeds: [buildNowPlayingEmbed(state, lyrNp)] });
   }
   if (cmd === "queue") {
-    if (!state.queue.length) return reply({ embeds: [infoEmbed("📭 Queue is empty", `Use \`/play <song>\` to add songs`)] });
+    if (!state.queue.length) return reply({ embeds: [infoEmbed("📭 Queue is empty", `Use \`${BOT_PREFIX}play <song>\` to add songs`)] });
     const lines = state.queue.slice(0, 10).map((x, i) => `\`${String(i + 1).padStart(2, "0")}.\` **${x.title}**\n　　👤 ${x.requestedBy}`).join("\n");
     const more = state.queue.length > 10 ? `\n*… and **${state.queue.length - 10}** tracks*` : "";
     return reply({
@@ -832,8 +1555,8 @@ async function runDmMusicCommand(msg, guild, cmd, parts) {
   }
   if (cmd === "play") {
     const q = parts.join(" ").trim();
-    if (!q) return reply({ embeds: [errorEmbed(`Please give a song name or link\n**Example:** \`/play lofi hip hop\``)] });
-    if (!userVC) return reply({ embeds: [errorEmbed(`I'm not in a voice room in **${guild.name}** yet — run \`/setup\` in the server first.`)] });
+    if (!q) return reply({ embeds: [errorEmbed(`Please give a song name or link\n**Example:** \`${BOT_PREFIX}play lofi hip hop\``)] });
+    if (!userVC) return reply({ embeds: [errorEmbed(`I'm not in a voice room in **${guild.name}** yet — run \`${BOT_PREFIX}setup\` in the server first.`)] });
     const item = { title: q, source: q, requestedBy: msg.author.tag, guild, voiceChannelId: userVC, textChannelId };
     state.queue.push(item);
     const shouldStart = !state.current;
@@ -856,8 +1579,8 @@ async function runDmMusicCommand(msg, guild, cmd, parts) {
   if (cmd === "playlist") {
     const parsed = parseLimitFromArgs(parts);
     const q = parsed.tokens.join(" ").trim();
-    if (!q) return reply({ embeds: [errorEmbed(`Please give a playlist link or search text\n**Example:** \`/playlist lofi playlist --limit 20\``)] });
-    if (!userVC) return reply({ embeds: [errorEmbed(`I'm not in a voice room in **${guild.name}** yet — run \`/setup\` in the server first.`)] });
+    if (!q) return reply({ embeds: [errorEmbed(`Please give a playlist link or search text\n**Example:** \`${BOT_PREFIX}playlist lofi playlist --limit 20\``)] });
+    if (!userVC) return reply({ embeds: [errorEmbed(`I'm not in a voice room in **${guild.name}** yet — run \`${BOT_PREFIX}setup\` in the server first.`)] });
     const items = await fetchPlaylistEntries(q, parsed.limit);
     if (!items.length) return reply({ embeds: [errorEmbed("No songs found in the playlist or search results")] });
     for (const { title, url, thumb, durationSec } of items) {
@@ -899,11 +1622,11 @@ async function runDmMusicCommand(msg, guild, cmd, parts) {
     markNpStopped(guild).catch(() => { });
     return reply({ embeds: [successEmbed("🛑 Stopped", "Queue cleared and left voice")] });
   }
-  if (cmd === "pause") { state.player.pause(); return reply({ embeds: [infoEmbed("⏸️ Paused", `Type \`/resume\` to resume`)] }); }
+  if (cmd === "pause") { state.player.pause(); return reply({ embeds: [infoEmbed("⏸️ Paused", `Type \`${BOT_PREFIX}resume\` to resume`)] }); }
   if (cmd === "resume") { state.player.unpause(); return reply({ embeds: [successEmbed("▶️ Resumed", `Now playing: **${state.current?.title || "—"}**`)] }); }
   if (cmd === "volume") {
     const value = parseInt(parts[0], 10);
-    if (Number.isNaN(value)) return reply({ embeds: [errorEmbed(`Please give a volume number (0-10000)\n**Example:** \`/volume 80\``)] });
+    if (Number.isNaN(value)) return reply({ embeds: [errorEmbed(`Please give a volume number (0-10000)\n**Example:** \`${BOT_PREFIX}volume 80\``)] });
     setVolumePct(state, value);
     const bar = "█".repeat(Math.round(Math.min(state.volumePct, 200) / 20)) + "░".repeat(10 - Math.round(Math.min(state.volumePct, 200) / 20));
     return reply({ embeds: [successEmbed("🔊  Volume updated", `\`${bar}\` **${state.volumePct}%**`)] });
@@ -920,7 +1643,7 @@ async function runDmMusicCommand(msg, guild, cmd, parts) {
   }
   if (cmd === "remove") {
     const index = parseInt(parts[0], 10);
-    if (Number.isNaN(index) || index < 1) return reply({ embeds: [errorEmbed(`Please give the queue number to remove\n**Example:** \`/remove 3\``)] });
+    if (Number.isNaN(index) || index < 1) return reply({ embeds: [errorEmbed(`Please give the queue number to remove\n**Example:** \`${BOT_PREFIX}remove 3\``)] });
     if (index > state.queue.length) return reply({ embeds: [errorEmbed(`Number is past the queue end (${state.queue.length} tracks)`)] });
     const [rm] = state.queue.splice(index - 1, 1);
     return reply({ embeds: [successEmbed("🗑️  Removed from queue", `**${rm?.title || "Unknown"}**`)] });
@@ -930,7 +1653,7 @@ async function runDmMusicCommand(msg, guild, cmd, parts) {
 async function handleDmMessage(msg) {
   const raw = String(msg.content || "").trim();
   if (!raw) return;
-  const looksLikeCommand = raw.startsWith("/");
+  const looksLikeCommand = raw.startsWith(BOT_PREFIX) || raw.startsWith("/");
   const stripped = raw.startsWith(BOT_PREFIX) ? raw.slice(BOT_PREFIX.length).trim()
     : raw.startsWith("/") ? raw.slice(1).trim() : raw;
   const parts = stripped.split(/\s+/).filter(Boolean);
@@ -940,9 +1663,9 @@ async function handleDmMessage(msg) {
 
   if (stripped && (looksLikeCommand || known)) {
     if (DM_BLOCKED_COMMANDS.has(cmd)) {
-      return msg.reply({ embeds: [errorEmbed(`🔒 \`/${cmd}\` is filtered out of private chat — it is a server/admin command. Use it in the server's #bocchi room.`)] });
+      return msg.reply({ embeds: [errorEmbed(`🔒 \`${BOT_PREFIX}${cmd}\` is filtered out of private chat — it is a server/admin command. Use it in the server's #bocchi room.`)] });
     }
-    if (cmd === "help") return msg.reply({ embeds: [buildHelpEmbedSlash()] });
+    if (cmd === "help") return msg.reply({ embeds: [buildHelpEmbedPrefix()] });
     if (cmd === "ping") {
       return msg.reply({
         embeds: [makeEmbed(COLORS.info).setDescription("### 🏓  Pong!").addFields({ name: "🌐 WebSocket", value: `\`${Math.round(client.ws.ping)} ms\``, inline: true })]
@@ -1002,6 +1725,348 @@ client.on("messageCreate", async (msg) => {
     if (msg.channelId === getSavedAiChannel(msg.guild.id)) {
       await handleAiChatMessage(msg);
       return;
+    }
+
+    const raw = (msg.content || "").trim();
+    if (!raw.startsWith(BOT_PREFIX)) return;
+
+    const body = raw.slice(BOT_PREFIX.length).trim();
+    if (!body) return;
+
+    const parts = body.split(/\s+/);
+    const cmdRaw = (parts.shift() || "").toLowerCase();
+
+    const cmd = ({
+      p: "play",
+      q: "queue",
+      now: "np",
+      next: "skip",
+      s: "skip",
+      st: "stop",
+      vol: "volume",
+      upd: "botupdate",
+      h: "help",
+      help: "help",
+      panel: "panel",
+      controls: "panel",
+    })[cmdRaw] || cmdRaw;
+
+    // Log every prefix command
+    logPretty("PREFIX", `${BOT_PREFIX}${cmd}`, {
+      user: msg.author.tag,
+      guild: msg.guild.name,
+    });
+
+    const allowed = new Set(["help", "play", "playlist", "skip", "stop", "pause", "resume", "queue", "np", "remove", "shuffle", "loop", "volume", "ping", "botupdate", "panel", "setup", "ytstatus", "ytsignin", "ytsignout", "video", "watchtogether", "vstate"]);
+    if (!allowed.has(cmd)) {
+      return msg.reply({
+        embeds: [
+          errorEmbed(`Unknown command \`${BOT_PREFIX}${cmdRaw}\``)
+            .addFields({ name: "💡 Available commands", value: Array.from(allowed).map(c => `\`${BOT_PREFIX}${c}\``).join(" ") })
+        ]
+      });
+    }
+
+    if (cmd === "help") {
+      return msg.reply({ embeds: [buildHelpEmbedPrefix()] });
+    }
+
+    if (cmd === "setup") {
+      if (!isGuildAdmin(msg.member)) return msg.reply({ embeds: [errorEmbed("Manage Server permission required")] });
+      try {
+        const { voiceRoom, channel } = await runBocchiSetup(msg.guild);
+        return msg.reply({ content: `Done! Joined <#${voiceRoom.id}> (saved as the music room) and posted controls in <#${channel.id}>.` });
+      } catch (e) { return msg.reply({ embeds: [errorEmbed("Could not set up the bocchi room: " + (e?.message || e))] }); }
+    }
+
+    // Prepare option values similar to slash
+    let q = null, limit = null, index = null, mode = null, value = null;
+
+    if (cmd === "play") {
+      q = parts.join(" ").trim();
+      if (!q) return msg.reply({ embeds: [errorEmbed(`Please give a song name or link\n**Example:** \`${BOT_PREFIX}play lofi hip hop\` or \`${BOT_PREFIX}play https://open.spotify.com/track/...\``)] });
+    } else if (cmd === "video") {
+      q = parts.join(" ").trim();
+      if (!q) return msg.reply({ embeds: [errorEmbed(`Please give a YouTube video name or link\n**Example:** \`${BOT_PREFIX}video lofi hip hop\``)] });
+    } else if (cmd === "playlist") {
+      const parsed = parseLimitFromArgs(parts);
+      limit = parsed.limit;
+      q = parsed.tokens.join(" ").trim();
+      if (!q) return msg.reply({ embeds: [errorEmbed(`Please give a playlist link or search text\n**Example:** \`${BOT_PREFIX}playlist lofi playlist --limit 20\``)] });
+    } else if (cmd === "remove") {
+      index = parseInt(parts[0], 10);
+      if (Number.isNaN(index) || index < 1) return msg.reply({ embeds: [errorEmbed(`Please give the queue number to remove\n**Example:** \`${BOT_PREFIX}remove 3\``)] });
+    } else if (cmd === "loop") {
+      mode = (parts[0] || "").toLowerCase();
+      if (!mode) return msg.reply({ embeds: [errorEmbed(`Please specify a mode: \`off\` · \`track\` · \`queue\`\n**Example:** \`${BOT_PREFIX}loop track\``)] });
+    } else if (cmd === "volume") {
+      value = parseInt(parts[0], 10);
+      if (Number.isNaN(value)) return msg.reply({ embeds: [errorEmbed(`Please give a volume number (0-10000)\n**Example:** \`${BOT_PREFIX}volume 80\``)] });
+    }
+
+    // Voice channel check (same as slash)
+    const me = msg.guild.members.me;
+    const userVC = msg.member?.voice?.channelId;
+    const botVC = me?.voice?.channelId;
+    const sameVC = userVC && (!botVC || botVC === userVC);
+    const needsSameVC = !["help", "ping", "botupdate", "np", "queue", "panel", "setup", "ytstatus", "ytsignin", "ytsignout", "watchtogether", "vstate"].includes(cmd);
+    if (needsSameVC && !sameVC) {
+      return msg.reply({ embeds: [errorEmbed("Please join the bot's voice channel first 🎙️")] });
+    }
+
+    // Acknowledge receipt
+    if (cmd === "play") await replyAck(msg, "");
+    else if (cmd === "playlist") await replyAck(msg, "");
+    else if (cmd === "volume") await replyAck(msg, "");
+    else if (cmd === "skip") await replyAck(msg, "");
+    else if (cmd === "stop") await replyAck(msg, "");
+    else if (cmd === "pause") await replyAck(msg, "");
+    else if (cmd === "resume") await replyAck(msg, "");
+    else if (cmd === "ping") await replyAck(msg, "");
+    else if (cmd === "botupdate") await replyAck(msg, "");
+
+    // Execute using the same internal functions as slash
+    const state = getGuildState(msg.guild);
+
+    if (cmd === "ping") {
+      return msg.reply({
+        embeds: [
+          makeEmbed(COLORS.info)
+            .setDescription("### 🏓  Pong!")
+            .addFields(
+              { name: "🌐 WebSocket", value: `\`${Math.round(msg.client.ws.ping)} ms\``, inline: true },
+            )
+        ]
+      });
+    }
+
+    if (cmd === "botupdate") {
+      const m = await msg.reply({ embeds: [infoEmbed("🔄 Updating yt-dlp…", "One moment please")] });
+      await runYtDlpUpdate((t) => m.edit({
+        embeds: [
+          t.startsWith("✅")
+            ? successEmbed("✅ Update complete", "yt-dlp is now up to date")
+            : errorEmbed(t)
+        ], content: ""
+      }));
+      return;
+    }
+
+    if (cmd === "panel") {
+      const panel = state.current ? buildNowPlayingEmbed(state, state.currentLyrics) : buildPanelEmbed(msg.guild);
+      const ref = await upsertNpMessage(msg.guild, null, panel, true);
+      if (!ref) return msg.reply({ embeds: [errorEmbed("I cannot access the #bocchi control channel.")] });
+      if (state.current) startNowPlayingTicker(msg.guild, state);
+      return msg.reply({ content: `Music controls are in <#${ref.channelId}>.` });
+    }
+
+    if (cmd === "ytstatus") {
+      const ck = ytCookiesStatus();
+      return msg.reply({
+        embeds: [
+          makeEmbed(COLORS.info).setDescription(`### 🍪 YouTube sign-in\n${ck.exists ? `✅ signed in\n\`${ck.path}\` (${ck.size} bytes)` : `❌ not signed\nAdmin attach the file \`cookies.txt\` with \`${BOT_PREFIX}ytsignin\``}`)
+        ]
+      });
+    }
+
+    if (cmd === "ytsignin") {
+      if (!isGuildAdmin(msg.member)) return msg.reply({ embeds: [errorEmbed("Manage Server permission required")] });
+      const att = msg.attachments?.first?.();
+      if (!att) return msg.reply({ embeds: [errorEmbed(`Attach the cookies.txt file\n**Example:** attach it + \`${BOT_PREFIX}ytsignin\``)] });
+      try {
+        const r = await fetch(att.url);
+        const text = await r.text();
+        const saved = saveYTCookies(text);
+        return msg.reply({ embeds: [successEmbed("✅ YouTube signed in", `saved → \`${saved}\`\nTry \`${BOT_PREFIX}play ...\` `)] });
+      } catch (e) { return msg.reply({ embeds: [errorEmbed("Could not save cookies: " + (e?.message || e))] }); }
+    }
+
+    if (cmd === "ytsignout") {
+      if (!isGuildAdmin(msg.member)) return msg.reply({ embeds: [errorEmbed("Manage Server permission required")] });
+      try { fs.unlinkSync(ytCookiesPath()); } catch { }
+      if (!process.env.YTDLP_COOKIES_PATH) config.cookieFile = null;
+      return msg.reply({ embeds: [successEmbed("🗑️ Signed out", "Cookies removed")] });
+    }
+
+    if (cmd === "vstate") {
+      const d = voiceDiag(msg.guild);
+      return msg.reply({
+        embeds: [
+          makeEmbed(COLORS.info).setDescription(`### 🔍 Voice state`)
+            .addFields(
+              { name: "Bot VC", value: `${d.botVC}`, inline: true },
+              { name: "Connection", value: `${d.conn}`, inline: true },
+              { name: "Subscribed", value: `${d.subscribed}`, inline: true },
+              { name: "Player", value: `${d.player}`, inline: true },
+              { name: "Current", value: `${d.current}`, inline: false },
+              { name: "Queue", value: `${d.queue}`, inline: true },
+            )
+        ]
+      });
+    }
+
+    if (cmd === "video") {
+      const info = await resolveVideoInfo(q);
+      if (!info) return msg.reply({ embeds: [errorEmbed("Video not found — try another search")] });
+      const watchUrl = info.videoId ? `http://localhost:${config.port}/watch?v=${info.videoId}` : info.url;
+      const vThumb = info.thumb || (info.videoId ? `https://i.ytimg.com/vi/${info.videoId}/hqdefault.jpg` : thumbFor(info.url));
+      // Queue audio in VC too so voice hears it while watching the page
+      state.queue.push({ title: info.title, source: info.url, thumb: vThumb, durationSec: info.durationSec || null, requestedBy: msg.author.tag, guild: msg.guild, voiceChannelId: userVC, textChannelId: msg.channelId });
+      const vEmbed = makeEmbed(COLORS.music).setDescription(`### 🎬 ${info.title}`)
+        .addFields({ name: "🔗 Video page", value: info.url, inline: false }, { name: "🔊 Audio", value: "queued in voice — hear it while you watch the page", inline: false });
+      if (vThumb) vEmbed.setThumbnail(vThumb);
+      await msg.reply({ embeds: [vEmbed], components: buildVideoRows(info.videoId, watchUrl) });
+      if (!state.current) playNext(msg.guild, msg.channelId, state);
+      return;
+    }
+
+    if (cmd === "watchtogether") {
+      if (!userVC) return msg.reply({ embeds: [errorEmbed("Join a voice channel first, then use this command 🎙️")] });
+      try {
+        const vc = msg.guild.channels.cache.get(userVC);
+        const inv = await createWatchTogetherInvite(vc);
+        return msg.reply({
+          embeds: [
+            successEmbed("📺 Watch Together ready", `Click the link to watch together in **${vc?.name || "voice"}**\n${inv.url}\n\n*Video shows inside everyone's voice chat (bots can only send audio + activity links — Discord gives bots no video stream)*`)
+          ]
+        });
+      } catch (e) { return msg.reply({ embeds: [errorEmbed("Could not create a watch party (bot needs the Create Invite permission): " + (e?.message || e))] }); }
+    }
+
+    if (cmd === "play") {
+      const item = {
+        title: q,
+        source: q,
+        requestedBy: msg.author.tag,
+        guild: msg.guild,
+        voiceChannelId: userVC,
+        textChannelId: msg.channelId,
+      };
+      state.queue.push(item);
+      const shouldStart = !state.current;
+      const metaP = resolveTitleAndThumb(q);
+      if (shouldStart) playNext(msg.guild, msg.channelId, state);
+      const meta = await metaP;
+      if (meta.title && meta.title !== q) item.title = meta.title;
+      if (meta.thumb) item.thumb = meta.thumb;
+      if (meta.durationSec) item.durationSec = meta.durationSec;
+      const addedEmbed = makeEmbed(COLORS.success)
+        .setDescription(`### ➕ Added to queue`)
+        .addFields(
+          { name: "🎵 Track", value: `**${cleanTitle(item.title)}**`, inline: false },
+          { name: "📋 Queue position", value: `\`#${state.queue.length}\``, inline: true },
+          { name: "👤 Requested by", value: `${msg.author}`, inline: true },
+        );
+      if (item.thumb) addedEmbed.setThumbnail(item.thumb);
+      await msg.reply({ embeds: [addedEmbed] });
+      return;
+    }
+
+    if (cmd === "playlist") {
+      const items = await fetchPlaylistEntries(q, limit);
+      if (!items.length) return msg.reply({ embeds: [errorEmbed("No songs found in the playlist or search results")] });
+      for (const { title, url, thumb, durationSec } of items) {
+        state.queue.push({
+          title,
+          source: url,
+          thumb: thumb || thumbFor(url),
+          durationSec: durationSec || null,
+          requestedBy: msg.author.tag,
+          guild: msg.guild,
+          voiceChannelId: userVC,
+          textChannelId: msg.channelId,
+        });
+      }
+      const preview = items.slice(0, 5).map((x, i) => `\`${i + 1}.\` ${x.title}`).join("\n");
+      const more = items.length > 5 ? `\n*… and ${items.length - 5} tracks*` : "";
+      await msg.reply({
+        embeds: [
+          makeEmbed(COLORS.queue)
+            .setDescription(`### 📚 Playlist loaded`)
+            .addFields(
+              { name: "🎶 Total tracks", value: `**${items.length} tracks**`, inline: true },
+              { name: "👤 Requested by", value: `${msg.author}`, inline: true },
+              { name: "📋 First tracks", value: `${preview}${more}`, inline: false },
+            )
+        ]
+      });
+      if (!state.current) playNext(msg.guild, msg.channelId, state);
+      return;
+    }
+
+    if (cmd === "skip") {
+      state.skipRequested = true;
+      state.player.stop(true);
+      cleanupCurrentPipeline(state);
+      return msg.reply({ embeds: [successEmbed("⏭️ Skipped", state.queue.length ? `Next: **${state.queue[0]?.title || "—"}**` : "Queue is empty")] });
+    }
+
+    if (cmd === "stop") {
+      state.queue = [];
+      state.current = null;
+      state.startedAt = null;
+      state.loopMode = "off";
+      state.skipRequested = false;
+      if (state.leaveTimer) { clearTimeout(state.leaveTimer); state.leaveTimer = null; }
+      state.player.stop(true);
+      cleanupCurrentPipeline(state);
+      const vc = getVoiceConnection(msg.guild.id);
+      if (vc) vc.destroy();
+      markNpStopped(msg.guild).catch(() => { });
+      return msg.reply({ embeds: [successEmbed("🛑 Stopped", "Queue cleared and left voice")] });
+    }
+
+    if (cmd === "pause") { state.player.pause(); return msg.reply({ embeds: [infoEmbed("⏸️ Paused", "Type `n!resume` to resume")] }); }
+    if (cmd === "resume") { state.player.unpause(); return msg.reply({ embeds: [successEmbed("▶️ Resumed", `Now playing: **${state.current?.title || "—"}**`)] }); }
+
+    if (cmd === "np") {
+      if (!state.current) return msg.reply({ embeds: [infoEmbed("🎵 Nothing playing", "Use `n!play <song>` to start")] });
+      const lyrNp = await fetchLyrics(state.current.title).catch(() => null);
+      return msg.reply({ embeds: [buildNowPlayingEmbed(state, lyrNp)], components: buildControlRows(state) });
+    }
+
+    if (cmd === "queue") {
+      if (!state.queue.length) return msg.reply({ embeds: [infoEmbed("📭 Queue is empty", "Use `n!play <song>` to add songs")] });
+      const lines = state.queue.slice(0, 10).map((x, i) => `\`${String(i + 1).padStart(2, "0")}.\` **${x.title}**\n　　👤 ${x.requestedBy}`).join("\n");
+      const more = state.queue.length > 10 ? `\n*… and **${state.queue.length - 10}** tracks*` : "";
+      return msg.reply({
+        embeds: [
+          makeEmbed(COLORS.queue)
+            .setDescription(`### 📋 Queue`)
+            .addFields(
+              { name: `Tracks (${Math.min(state.queue.length, 10)}/${state.queue.length})`, value: lines + more, inline: false },
+              { name: "🔁 Loop", value: loopLabel(state.loopMode), inline: true },
+              { name: "🎵 Now playing", value: state.current ? `**${state.current.title}**` : "—", inline: true },
+            )
+        ]
+      });
+    }
+
+    if (cmd === "volume") {
+      setVolumePct(state, value);
+      const bar = "█".repeat(Math.round(Math.min(state.volumePct, 200) / 20)) + "░".repeat(10 - Math.round(Math.min(state.volumePct, 200) / 20));
+      return msg.reply({
+        embeds: [
+          successEmbed("🔊  Volume updated", `\`${bar}\` **${state.volumePct}%**`)
+        ]
+      });
+    }
+
+    if (cmd === "shuffle") {
+      shuffleArray(state.queue);
+      return msg.reply({ embeds: [successEmbed("🔀 Shuffled", `Reordered **${state.queue.length} tracks** done`)] });
+    }
+
+    if (cmd === "remove") {
+      if (index > state.queue.length) return msg.reply({ embeds: [errorEmbed(`Number is past the queue end (${state.queue.length} tracks)`)] });
+      const [rm] = state.queue.splice(index - 1, 1);
+      return msg.reply({ embeds: [successEmbed("🗑️  Removed from queue", `**${rm?.title || "Unknown"}**`)] });
+    }
+
+    if (cmd === "loop") {
+      if (!["off", "track", "queue"].includes(mode)) return msg.reply({ embeds: [errorEmbed("Mode must be `off` · `track` · `queue`")] });
+      state.loopMode = mode;
+      return msg.reply({ embeds: [successEmbed("🔁 Loop updated", `Current mode: **${loopLabel(mode)}**`)] });
     }
 
   } catch (e) {
@@ -1075,29 +2140,105 @@ const commands = [
 const guildStates = new Map();
 
 // Persisted per-guild settings (volume) — survives restarts via data dir.
-
-
+function volumeStorePath() { return path.join(config.dataDir, "guild-settings.json"); }
+function loadGuildSettings() {
+  try {
+    const raw = fs.readFileSync(volumeStorePath(), "utf8");
+    const o = JSON.parse(raw);
+    return (o && typeof o === "object") ? o : {};
+  } catch { return {}; }
+}
 // Only pass a cookies file to yt-dlp if it actually looks like a Netscape
 // cookies file (non-empty, tab-separated, ideally with the standard header).
 // An empty/garbage file makes yt-dlp fail EVERYTHING — worse than no cookies.
 let _cookieCache = { path: null, mtimeMs: 0, valid: false };
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+function effectiveCookieFile() {
+  const p = config.cookieFile;
+  if (!p) return null;
+  try {
+    const st = fs.statSync(p);
+    if (!st.isFile() || st.size < 50) { _cookieCache = { path: p, mtimeMs: st.size, valid: false }; return null; }
+    const key = p + ":" + st.size + ":" + st.mtimeMs;
+    if (_cookieCache.path === key) return _cookieCache.valid ? p : null;
+    const head = fs.readFileSync(p, "utf8").slice(0, 4096);
+    const lines = head.split("\n").filter((l) => l && !l.trim().startsWith("#"));
+    const valid = lines.length > 0 && lines.some((l) => l.includes("\t") && /youtube\.com|youtu\.be|google\.com/i.test(l));
+    _cookieCache = { path: key, valid };
+    if (!valid) logPretty("WARN", `Ignoring invalid cookies file ${p} (not Netscape format) — running without cookies`);
+    return valid ? p : null;
+  } catch { return null; }
+}
+function saveGuildSettings(all) {
+  try {
+    fs.mkdirSync(config.dataDir, { recursive: true });
+    fs.writeFileSync(volumeStorePath(), JSON.stringify(all), "utf8");
+  } catch (e) { logPretty("ERROR", "save settings: " + (e?.message || e)); }
+}
+function getSavedVolume(guildId) {
+  const v = loadGuildSettings()[String(guildId)]?.volumePct;
+  return Number.isFinite(v) ? Math.max(0, Math.min(10000, v)) : null;
+}
+function setSavedVolume(guildId, pct) {
+  const all = loadGuildSettings();
+  all[String(guildId)] = { ...(all[String(guildId)] || {}), volumePct: pct };
+  saveGuildSettings(all);
+}
+function getSavedSpeed(guildId) {
+  const v = loadGuildSettings()[String(guildId)]?.speed;
+  return Number.isFinite(v) && v >= 0.5 && v <= 2 ? v : 1;
+}
+function getSavedShowLyrics(guildId) {
+  const v = loadGuildSettings()[String(guildId)]?.showLyrics;
+  return v === undefined ? true : v !== false;
+}
+function setSavedShowLyrics(guildId, on) {
+  const all = loadGuildSettings();
+  all[String(guildId)] = { ...(all[String(guildId)] || {}), showLyrics: on !== false };
+  saveGuildSettings(all);
+}
+function getSavedShowControls(guildId) {
+  const v = loadGuildSettings()[String(guildId)]?.showControls;
+  return v === undefined ? true : v !== false;
+}
+function setSavedShowControls(guildId, on) {
+  const all = loadGuildSettings();
+  all[String(guildId)] = { ...(all[String(guildId)] || {}), showControls: on !== false };
+  saveGuildSettings(all);
+}
+function getSavedMusicVoice(guildId) {
+  return loadGuildSettings()[String(guildId)]?.musicVoiceChannelId || null;
+}
+function setSavedMusicVoice(guildId, channelId) {
+  const all = loadGuildSettings();
+  all[String(guildId)] = { ...(all[String(guildId)] || {}), musicVoiceChannelId: channelId };
+  saveGuildSettings(all);
+}
+function setSavedSpeed(guildId, speed) {
+  const all = loadGuildSettings();
+  all[String(guildId)] = { ...(all[String(guildId)] || {}), speed };
+  saveGuildSettings(all);
+}
+function getSavedAiChannel(guildId) {
+  return loadGuildSettings()[String(guildId)]?.aiChatChannelId || null;
+}
+function aiSessionKeyForChannel(guildId, channelId) {
+  return getSavedAiChannel(guildId) === channelId
+    ? `channel:${guildId}:${channelId}`
+    : `slash:${guildId}:${channelId}`;
+}
+function setSavedAiChannel(guildId, channelId) {
+  const all = loadGuildSettings();
+  all[String(guildId)] = { ...(all[String(guildId)] || {}), aiChatChannelId: channelId };
+  saveGuildSettings(all);
+}
+function getSavedControlChannel(guildId) {
+  return loadGuildSettings()[String(guildId)]?.controlChannelId || null;
+}
+function setSavedControlChannel(guildId, channelId) {
+  const all = loadGuildSettings();
+  all[String(guildId)] = { ...(all[String(guildId)] || {}), controlChannelId: channelId };
+  saveGuildSettings(all);
+}
 async function deletePublicAiChat(guild) {
   const channelId = getSavedAiChannel(guild.id);
   if (!channelId) throw new Error("No public AI chat is configured. Run /setai first.");
@@ -1269,17 +2410,436 @@ function voiceDiag(guild) {
     queue: st?.queue?.length ?? 0,
   };
 }
+function cleanupCurrentPipeline(state) {
+  if (!state.currentPipe) return;
+  // Mark teardown time: errors surfacing within ~3s of an intentional
+  // teardown (skip/stop/song switch) are dying-pipe noise, not real drops.
+  // handlePlayerError ignores them so skips don't cry "signal lost".
+  state.lastTeardownAt = Date.now();
+  try {
+    // Destroy the audio stream if present
+    try { state.currentPipe.stream?.destroy?.(); } catch { }
+    // Kill the ffmpeg process
+    try { state.currentPipe.ff?.kill?.("SIGKILL"); } catch { }
+    // If there is a helper process (e.g. yt-dlp for TikTok), kill it too
+    try { state.currentPipe.helper?.kill?.("SIGKILL"); } catch { }
+  } catch (e) {
+    swallowPipeError(e);
+  } finally {
+    state.currentPipe = null;
+  }
+}
+function isUrl(s) { try { new URL(s); return true; } catch { return false; } }
 
+// yt-dlp helper functions
+async function getTitle(input) {
+  const r = await resolveTitleAndThumb(input);
+  return r.title;
+}
+// Thumbnail helpers — YouTube thumbs need no API key: i.ytimg.com/vi/ID/hqdefault.jpg
+function thumbFor(source) {
+  const id = extractYouTubeIdSafe(source);
+  return id ? `https://i.ytimg.com/vi/${id}/hqdefault.jpg` : null;
+}
+function extractYouTubeIdSafe(s) { try { return extractYouTubeId(s); } catch { return null; } }
+// Native artwork from yt-dlp (TikTok cover, SoundCloud art, YouTube thumb…),
+// falling back to i.ytimg.com for YouTube URLs.
+function pickThumb(e, fallbackUrl) {
+  try {
+    if (e?.thumbnail) return e.thumbnail;
+    const list = e?.thumbnails;
+    if (Array.isArray(list) && list.length) {
+      const last = list[list.length - 1];
+      if (last?.url) return last.url;
+    }
+  } catch { }
+  return fallbackUrl ? thumbFor(fallbackUrl) : null;
+}
+// ONE yt-dlp call → { title, thumb, durationSec }. Falls back to raw query.
+async function resolveTitleAndThumb(input) {
+  try {
+    // TikTok: metadata only via TikWM (fast, no yt-dlp).
+    if (isTikTokUrl(input)) {
+      try {
+        const m = await tiktokMeta(input);
+        return { title: m.title, thumb: m.thumb, durationSec: numOrNull(m.duration) };
+      } catch (e) { logPretty("WARN", "tikwm meta failed: " + (e?.message || e)); }
+    }
+    if (isSpotifyUrl(input)) {
+      const meta = await spotifyMeta(input);
+      if (meta.title && meta.title !== input) return { ...meta, durationSec: null };
+    }
+    const info = await ytdlp(input, ytdlpOpts({ dumpSingleJson: true, skipDownload: true, noWarnings: true }));
+    const e = info?.entries?.[0] || info;
+    if (e?.title) {
+      const url = e.webpage_url || input;
+      return { title: e.title, thumb: pickThumb(e, url) || thumbFor(input), durationSec: numOrNull(e.duration) };
+    }
+  } catch { }
+  return { title: input, thumb: thumbFor(input), durationSec: null };
+}
+function numOrNull(v) {
+  const n = Number(v);
+  return Number.isFinite(n) && n > 0 ? n : null;
+}
+// Spotify oembed gives title + album art in one call.
+async function spotifyMeta(input) {
+  try {
+    const url = normalizeSpotifyUrl(input);
+    if (!url) return { title: input, thumb: null };
+    const data = await fetchJsonWithTimeout(`https://open.spotify.com/oembed?url=${encodeURIComponent(url)}`, 8000);
+    if (data?.title) return { title: String(data.title), thumb: data.thumbnail_url || null };
+  } catch { }
+  return { title: input, thumb: null };
+}
+async function resolveFirstVideoUrl(query) {
+  if (isSpotifyUrl(query)) {
+    const kind = spotifyKind(query);
+    if (kind === "album" || kind === "playlist") return null;
+    const q2 = await spotifyTrackToSearchQuery(query);
+    if (q2) query = q2;
+  }
+  if (isUrl(query)) return query;
+  try {
+    const out = await ytdlp(`ytsearch1:${query}`, ytdlpOpts({ dumpSingleJson: true }));
+    return out?.entries?.[0]?.webpage_url || null;
+  } catch (e) {
+    logPretty("ERROR", "search resolve fail: " + (e?.message || e));
+    return null;
+  }
+}
+// ---- Video-page helpers (legit: share watch page + iframe, audio via voice) ----
+function extractYouTubeId(u) {
+  try {
+    const s = String(u || "");
+    let m = s.match(/(?:youtube\.com\/(?:watch\?[^#]*v=|shorts\/|embed\/|live\/)|youtu\.be\/)([A-Za-z0-9_-]{6,})/);
+    if (m) return m[1];
+    m = s.match(/^([A-Za-z0-9_-]{11})$/);
+    if (m) return m[1];
+  } catch { }
+  return null;
+}
+async function resolveVideoInfo(query) {
+  // ONE yt-dlp call (was: search call + info call). Title + URL together.
+  let input = query;
+  if (isSpotifyUrl(query)) {
+    const kind = spotifyKind(query);
+    if (kind === "album" || kind === "playlist") return null;
+    const q2 = await spotifyTrackToSearchQuery(query);
+    if (!q2) return null;
+    input = q2;
+  }
+  if (!isUrl(input)) input = `ytsearch1:${input}`;
+  try {
+    const info = await ytdlp(input, ytdlpOpts({ dumpSingleJson: true, skipDownload: true, noWarnings: true }));
+    const e = info?.entries?.[0] || info;
+    if (!e) return null;
+    const url = e.webpage_url || input;
+    const title = e.title || query;
+    return { title, url, thumb: pickThumb(e, url), durationSec: numOrNull(e.duration), videoId: extractYouTubeId(e.webpage_url || url) || extractYouTubeId(query) };
+  } catch (e) {
+    logPretty("ERROR", "video resolve fail: " + (e?.message || e));
+    return null;
+  }
+}
+function buildVideoRows(videoId, pageUrl) {
+  const row = new ActionRowBuilder();
+  if (videoId) {
+    row.addComponents(new ButtonBuilder().setLabel("▶ Watch on YouTube").setStyle(ButtonStyle.Link).setURL(`https://www.youtube.com/watch?v=${videoId}`));
+    if (pageUrl) row.addComponents(new ButtonBuilder().setLabel("🖥 Open video page").setStyle(ButtonStyle.Link).setURL(pageUrl));
+  } else if (pageUrl) {
+    // TikTok / SoundCloud / others: no embed page, just the source link.
+    row.addComponents(new ButtonBuilder().setLabel("🔗 Open link").setStyle(ButtonStyle.Link).setURL(pageUrl));
+  }
+  return row.components.length ? [row] : [];
+}
+// Watch Together: the ONLY legit way to show video inside a voice channel.
+// Bots cannot push video frames (audio-only API); instead the bot creates an
+// Activity invite so everyone in the VC watches YouTube together in sync.
+const WATCH_TOGETHER_APP_ID = "880218394199220334";
+async function createWatchTogetherInvite(voiceChannel) {
+  const invite = await voiceChannel.createInvite({
+    maxAge: 6 * 3600,
+    targetApplication: WATCH_TOGETHER_APP_ID,
+    targetType: InviteTargetType.EmbeddedApplication,
+    reason: "Watch Together session",
+  });
+  return invite;
+}
+async function getDirectAudioUrlAndHeaders(input) {
+  // Single yt-dlp call: resolve the page URL (or search query) AND extract
+  // the CDN audio URL in one shot. Previously we called resolveFirstVideoUrl
+  // first (one yt-dlp invocation) and then called this function (a second
+  // invocation). The CDN URL YouTube returns expires quickly, so by the time
+  // ffmpeg started fetching it the URL was already dead → instant FINISHED.
+  // Now we do everything in one call so ffmpeg starts immediately.
+  const info = await ytdlp(input, ytdlpOpts({ dumpSingleJson: true, f: "bestaudio/best" }));
+  const url = info?.url;
+  const headers = info?.http_headers || {};
+  if (!url) throw new Error("yt-dlp did not return media url");
+  return { url, headers };
+}
+function buildFfmpegHeadersString(h) {
+  const merged = {
+    "User-Agent": h["User-Agent"] || h["user-agent"] || "Mozilla/5.0",
+    "Accept": h["Accept"] || "*/*",
+    "Accept-Language": h["Accept-Language"] || "en-US,en;q=0.9",
+    "Origin": h["Origin"] || "https://www.youtube.com",
+    "Referer": h["Referer"] || "https://www.youtube.com/",
+    ...(h.Cookie ? { "Cookie": h.Cookie } : (h.cookie ? { "Cookie": h.cookie } : {})),
+  };
+  return Object.entries(merged).map(([k, v]) => `${k}: ${v}`).join("\r\n");
+}
+function spawnFfmpegFromDirectUrl(url, headersStr) {
+  if (!FFMPEG_AVAILABLE) throw new Error("ffmpeg binary not available");
+
+  // Build argument list dynamically based off the audio/network config
+  const a = [];
+
+  // Base logging and banner settings
+  a.push("-loglevel", "info", "-hide_banner");
+
+  // Reconnect logic with configurable max delay
+  a.push(
+    "-reconnect", "1",
+    "-reconnect_streamed", "1",
+    "-reconnect_on_network_error", "1",
+    "-reconnect_delay_max", String(config.ffmpegReconnectDelayMax)
+  );
+
+  // Tune buffering and probing depending on latency preference
+  if (config.ffmpegLowLatency) {
+    a.push(
+      "-fflags", "+nobuffer",
+      "-flags", "low_delay",
+      "-analyzeduration", String(config.ffmpegInputAnalyzeMs * 1000), // microseconds
+      "-probesize", "32k",
+      "-rw_timeout", "15000000",
+      "-timeout", "15000000"
+    );
+  } else {
+    const us = Math.max(0, config.ffmpegInputAnalyzeMs) * 1000;
+    a.push("-analyzeduration", String(us), "-probesize", "256k");
+  }
+
+  // Pass through HTTP headers and input URL
+  a.push("-headers", headersStr + "\r\n", "-i", url);
+
+  // Drop any video streams
+  a.push("-vn");
+
+  // Apply channel count and sample rate
+  a.push("-ac", String(config.audioChannels));
+  a.push("-ar", String(config.audioSampleRate));
+
+  // Optional audio filter chain
+  const afChain = (config.audioFilter || "").trim();
+  if (afChain) {
+    a.push("-af", afChain);
+  }
+
+  // Encode to Opus with bitrate and VBR settings
+  a.push("-c:a", "libopus");
+  a.push("-b:a", config.opusBitrate);
+
+  // Configure variable bitrate mode
+  if (config.opusVbr === "off") {
+    a.push("-vbr", "off");
+  } else if (config.opusVbr === "constrained") {
+    a.push("-vbr", "constrained");
+  } else {
+    a.push("-vbr", "on");
+  }
+
+  // Set Opus application profile if valid
+  if (["audio", "voip", "lowdelay"].includes(config.opusApplication)) {
+    a.push("-application", config.opusApplication);
+  }
+
+  // Frame duration (accepted values: 2.5,5,10,20,40,60 ms)
+  const fd = Number(config.opusFrameDuration);
+  if ([2.5, 5, 10, 20, 40, 60].includes(fd)) {
+    a.push("-frame_duration", String(fd));
+  }
+
+  // Complexity (0–10)
+  const cx = Number(config.opusComplexity);
+  if (Number.isFinite(cx) && cx >= 0 && cx <= 10) {
+    a.push("-compression_level", String(cx));
+  }
+
+  // Append any custom extra arguments
+  if (config.ffmpegExtraArgs && config.ffmpegExtraArgs.trim()) {
+    // Split on whitespace to allow multiple flags
+    a.push(...config.ffmpegExtraArgs.trim().split(/\s+/));
+  }
+
+  // Output container and pipe to stdout
+  a.push("-f", "ogg", "pipe:1");
+
+  const ff = spawn(FFMPEG || "ffmpeg", a, { stdio: ["ignore", "pipe", "pipe"] });
+  ff.on("error", (e) => logPretty("ERROR", "ffmpeg spawn error: " + (e?.message || e)));
+  ff.stdout.on("error", swallowPipeError);
+  ff.stderr.on("error", swallowPipeError);
+  ff.stderr.on("data", d => {
+    try {
+      logPretty("LOG", "[ffmpeg] " + d.toString().trim());
+    } catch { }
+  });
+  return ff;
+}
+
+// Universal yt-dlp → ffmpeg pipe for ALL platforms.
+// yt-dlp downloads best audio → stdout → ffmpeg stdin → opus ogg → stdout → Discord.
+// Crucially, ff.stdin has an 'error' listener so SIGKILL on stop/skip never
+// throws an unhandled EPIPE that crashes the Node process.
+// Alternate YouTube player client for cookieless fallback.
+// web↔android: if one demands sign-in / PO token, try the other.
+function altPlayerClient(primary) {
+  return /android/i.test(primary || "") ? "web,web_creator" : "android";
+}
+function spawnUniversalPipe(source, playerClient, speed, offsetSec) {
+  if (!FFMPEG_AVAILABLE) throw new Error("ffmpeg binary not available");
+
+  // ── yt-dlp ───────────────────────────────────────────────────────────────
+  const isTikTok = source.includes("tiktok.com") || source.includes("vt.tiktok.com");
+  const ytArgs = [];
+  if (config.ytdlpForceIpv4) ytArgs.push("--force-ipv4");
+  const ckFile = effectiveCookieFile();
+  if (ckFile) ytArgs.push("--cookies", ckFile);
+  ytArgs.push(
+    "--no-check-certificates",
+    "--retries", "infinite",
+    "--fragment-retries", "infinite",
+    "--buffer-size", "64K",
+    "--js-runtimes", "node",
+  );
+  if (isTikTok) {
+    // TikTok: needs impersonation to avoid 403
+    // and must pick audio-only formats (some clips are video-only)
+    ytArgs.push(
+      "--impersonate", "chrome",
+      "-f", "bestaudio[acodec!=none]/ba[acodec!=none]/b[acodec!=none]",
+    );
+  } else {
+    // YouTube and others — prefer direct m4a (single progressive file = fastest
+    // start, no hundreds of DASH fragments on 30min+ videos), concurrent
+    // fragments keep long videos from stalling mid-play.
+    ytArgs.push(
+      "--extractor-args", `youtube:player-client=${playerClient || config.ytdlpPlayerClient};player_skip=webpage`,
+      "-f", "bestaudio[ext=m4a]/bestaudio[acodec=aac]/bestaudio/best",
+      "--concurrent-fragments", "4",
+    );
+  }
+  ytArgs.push("-o", "-", source);
+  const helper = spawn(YTDLP_BIN, ytArgs, { stdio: ["ignore", "pipe", "pipe"] });
+  helper.on("error", (e) => logPretty("ERROR", "yt-dlp(universal) error: " + (e?.message || e)));
+  helper.stdout.on("error", swallowPipeError);
+  helper.stderr.on("error", swallowPipeError);
+  helper.stderr.on("data", (d) => { try { logPretty("LOG", "[yt-dlp] " + d.toString().trim()); } catch { } });
+
+  // ── ffmpeg ────────────────────────────────────────────────────────────────
+  const a = ffmpegStdinArgs(speed, offsetSec);
+
+  const ff = spawn(FFMPEG || "ffmpeg", a, { stdio: ["pipe", "pipe", "pipe"] });
+  ff.on("error", (e) => logPretty("ERROR", "ffmpeg(universal) error: " + (e?.message || e)));
+  ff.stdout.on("error", swallowPipeError);
+  ff.stderr.on("error", swallowPipeError);
+  // *** EPIPE guard: when stop/skip kills ffmpeg, yt-dlp writes into closed stdin
+  // without this handler Node throws unhandled EPIPE and dies ***
+  ff.stdin.on("error", swallowPipeError);
+  ff.stderr.on("data", (d) => { try { logPretty("LOG", "[ffmpeg] " + d.toString().trim()); } catch { } });
+
+  helper.stdout.pipe(ff.stdin);
+  return { ff, stream: cushionStream(ff), helper, raw: ff.stdout };
+}
+// Playback speed via ffmpeg atempo (single filter supports 0.5x–2x).
+function clampSpeed(speed) {
+  const s = Number(speed);
+  if (!Number.isFinite(s)) return 1;
+  return Math.min(2, Math.max(0.5, s));
+}
+function combineAudioFilters(base, speed) {
+  const parts = [];
+  const b = (base || "").trim();
+  if (b) parts.push(b);
+  const s = clampSpeed(speed);
+  if (s !== 1) parts.push(`atempo=${s}`);
+  return parts.join(",");
+}
+// Shared ffmpeg args: read audio from stdin pipe, output opus/ogg to stdout.
+// offsetSec>0 adds output-side -ss (accurate seek; input is an unseekable pipe).
+function ffmpegStdinArgs(speed, offsetSec) {
+  const a = [];
+  a.push("-loglevel", "info", "-hide_banner");
+  if (config.ffmpegLowLatency) {
+    a.push("-fflags", "+nobuffer", "-flags", "low_delay",
+      "-analyzeduration", String(Math.max(500000, config.ffmpegInputAnalyzeMs * 1000)), "-probesize", "64k");
+  } else {
+    a.push("-analyzeduration", String(Math.max(0, config.ffmpegInputAnalyzeMs) * 1000), "-probesize", "256k");
+  }
+  // Bigger pipe-input queue so a busy CPU doesn't drop the stream start.
+  a.push("-thread_queue_size", "1024", "-i", "pipe:0", "-vn");
+  const off = Number(offsetSec);
+  if (Number.isFinite(off) && off > 0) a.push("-ss", String(off)); // output seek: decode+drop, exact
+  a.push("-ac", String(config.audioChannels), "-ar", String(config.audioSampleRate));
+  const afChain = combineAudioFilters(config.audioFilter, speed);
+  if (afChain) a.push("-af", afChain);
+  a.push("-c:a", "libopus", "-b:a", config.opusBitrate);
+  if (config.opusVbr === "off") a.push("-vbr", "off");
+  else if (config.opusVbr === "constrained") a.push("-vbr", "constrained");
+  else a.push("-vbr", "on");
+  if (["audio", "voip", "lowdelay"].includes(config.opusApplication))
+    a.push("-application", config.opusApplication);
+  const fd = Number(config.opusFrameDuration);
+  if ([2.5, 5, 10, 20, 40, 60].includes(fd)) a.push("-frame_duration", String(fd));
+  const cx = Number(config.opusComplexity);
+  if (Number.isFinite(cx) && cx >= 0 && cx <= 10) a.push("-compression_level", String(cx));
+  if (config.ffmpegExtraArgs && config.ffmpegExtraArgs.trim())
+    a.push(...config.ffmpegExtraArgs.trim().split(/\s+/));
+  a.push("-f", "ogg", "pipe:1");
+  return a;
+}
 // ffmpeg with stdin input (caller pipes audio bytes in). Same output/cushion
 // plumbing as the universal pipe; helper=null (no yt-dlp child).
-
+function spawnFfmpegStdin(tag, speed, offsetSec) {
+  if (!FFMPEG_AVAILABLE) throw new Error("ffmpeg binary not available");
+  const ff = spawn(FFMPEG || "ffmpeg", ffmpegStdinArgs(speed, offsetSec), { stdio: ["pipe", "pipe", "pipe"] });
+  ff.on("error", (e) => logPretty("ERROR", `ffmpeg(${tag}) error: ` + (e?.message || e)));
+  ff.stdout.on("error", swallowPipeError);
+  ff.stderr.on("error", swallowPipeError);
+  ff.stdin.on("error", swallowPipeError);
+  ff.stderr.on("data", (d) => { try { logPretty("LOG", `[ffmpeg(${tag})] ` + d.toString().trim()); } catch { } });
+  return { ff, stream: cushionStream(ff), helper: null, raw: ff.stdout };
+}
 // Wrap an ffmpeg process's stdout in a PassThrough cushion (up to 384KB ≈
 // 24s of 128k audio) so slow-starting sources don't stutter the beginning.
 // Data is preserved for playback; probe the LIVE raw output separately.
-
+function cushionStream(ff) {
+  const cushion = new PassThrough({ highWaterMark: 384 * 1024 });
+  cushion.on("error", swallowPipeError);
+  ff.stdout.pipe(cushion);
+  cushion.on("close", () => { try { ff.stdout.unpipe(cushion); } catch { } });
+  return cushion;
+}
 // Wait until minBytes are cushioned (or source dies / timeout) before playing.
 // Uses 'readable' (not 'data') so nothing is consumed before demuxProbe.
-
+async function awaitPrebuffer(pipeObj, minBytes, maxWaitMs) {
+  const s = pipeObj?.stream;
+  if (!s || s.destroyed || minBytes <= 0) return;
+  if ((s.readableLength || 0) >= minBytes) return;
+  await new Promise((resolve) => {
+    let done = false;
+    const cleanup = () => { clearTimeout(timer); s.off("readable", onReadable); s.off("close", onClose); s.off("error", onClose); };
+    const finish = () => { if (!done) { done = true; cleanup(); resolve(); } };
+    const onReadable = () => { if ((s.readableLength || 0) >= minBytes) finish(); };
+    const onClose = () => finish(); // dead source → let probe fail fast
+    const timer = setTimeout(finish, maxWaitMs);
+    s.on("readable", onReadable);
+    s.on("close", onClose);
+    s.on("error", onClose);
+  });
+}
 
 // Spawn a TikTok pipeline using yt-dlp piping directly into ffmpeg. This avoids
 // fetching the TikTok media URL via ffmpeg (which often results in 403
@@ -1287,7 +2847,114 @@ function voiceDiag(guild) {
 // media, and ffmpeg consumes the stream from stdin. The returned object
 // includes the ffmpeg process, its stdout stream, and the yt-dlp helper
 // process for cleanup.
-
+function spawnTikTokPipe(pageUrl) {
+  if (!FFMPEG_AVAILABLE) {
+    throw new Error("ffmpeg binary not available");
+  }
+  // Build yt-dlp CLI arguments. We respect configuration options such as
+  // force IPv4 and cookie file. The output is written to stdout ("-") so
+  // ffmpeg can read it from a pipe.
+  const ytdlpArgs = [];
+  // use force-ipv4 if configured
+  if (config.ytdlpForceIpv4) {
+    ytdlpArgs.push("--force-ipv4");
+  }
+  // use cookie file if provided
+  const legacyCk = effectiveCookieFile();
+  if (legacyCk) {
+    ytdlpArgs.push("--cookies", legacyCk);
+  }
+  // Basic resilient settings
+  ytdlpArgs.push(
+    "--no-check-certificates",
+    "--retries", "infinite",
+    "--fragment-retries", "infinite",
+    "-f", "ba",
+    "-o", "-",
+    "--js-runtimes", "node",
+    pageUrl
+  );
+  // Spawn yt-dlp process
+  const helper = spawn("yt-dlp", ytdlpArgs, {
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  helper.on("error", (e) => logPretty("ERROR", "yt-dlp spawn error: " + (e?.message || e)));
+  helper.stderr.on("error", swallowPipeError);
+  helper.stderr.on("data", (d) => {
+    try {
+      logPretty("LOG", "[yt-dlp] " + d.toString().trim());
+    } catch { }
+  });
+  // Build ffmpeg arguments based on our audio configuration. Unlike
+  // spawnFfmpegFromDirectUrl, we do not include reconnect flags because
+  // yt-dlp is handling network access. We still honor low‑latency and
+  // audio quality settings.
+  const a = [];
+  a.push("-loglevel", "info", "-hide_banner");
+  if (config.ffmpegLowLatency) {
+    a.push(
+      "-fflags", "+nobuffer",
+      "-flags", "low_delay",
+      "-analyzeduration", String(config.ffmpegInputAnalyzeMs * 1000),
+      "-probesize", "32k"
+    );
+  } else {
+    const us = Math.max(0, config.ffmpegInputAnalyzeMs) * 1000;
+    a.push("-analyzeduration", String(us), "-probesize", "256k");
+  }
+  // Input from stdin (pipe)
+  a.push("-i", "pipe:0");
+  // Drop any video
+  a.push("-vn");
+  // Channels and sample rate
+  a.push("-ac", String(config.audioChannels));
+  a.push("-ar", String(config.audioSampleRate));
+  // Optional audio filter
+  const afChain = (config.audioFilter || "").trim();
+  if (afChain) {
+    a.push("-af", afChain);
+  }
+  // Opus encoding settings
+  a.push("-c:a", "libopus");
+  a.push("-b:a", config.opusBitrate);
+  if (config.opusVbr === "off") {
+    a.push("-vbr", "off");
+  } else if (config.opusVbr === "constrained") {
+    a.push("-vbr", "constrained");
+  } else {
+    a.push("-vbr", "on");
+  }
+  if (["audio", "voip", "lowdelay"].includes(config.opusApplication)) {
+    a.push("-application", config.opusApplication);
+  }
+  const fd = Number(config.opusFrameDuration);
+  if ([2.5, 5, 10, 20, 40, 60].includes(fd)) {
+    a.push("-frame_duration", String(fd));
+  }
+  const cx = Number(config.opusComplexity);
+  if (Number.isFinite(cx) && cx >= 0 && cx <= 10) {
+    a.push("-compression_level", String(cx));
+  }
+  if (config.ffmpegExtraArgs && config.ffmpegExtraArgs.trim()) {
+    a.push(...config.ffmpegExtraArgs.trim().split(/\s+/));
+  }
+  a.push("-f", "ogg", "pipe:1");
+  // Spawn ffmpeg process
+  const ff = spawn(FFMPEG || "ffmpeg", a, {
+    stdio: ["pipe", "pipe", "pipe"],
+  });
+  ff.on("error", (e) => logPretty("ERROR", "ffmpeg(tiktok) spawn error: " + (e?.message || e)));
+  ff.stdout.on("error", swallowPipeError);
+  ff.stderr.on("error", swallowPipeError);
+  ff.stderr.on("data", (d) => {
+    try {
+      logPretty("LOG", "[ffmpeg(tiktok)] " + d.toString().trim());
+    } catch { }
+  });
+  // Pipe yt-dlp stdout into ffmpeg stdin
+  helper.stdout.pipe(ff.stdin);
+  return { ff, stream: ff.stdout, helper };
+}
 
 // Playlist helper: fetch entries list
 // Returns [{ title, url }] from playlist/mix links or search queries (ytsearchN:)
@@ -2475,15 +4142,353 @@ async function dashSeek(guildId, seconds) {
   await playSame(guild, state.current.textChannelId, state.current, state);
   return s;
 }
-
+function dashLoginPage(msg = "") {
+  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Music Bot · Sign in</title>
+<script src="https://cdn.tailwindcss.com"></script><link href="https://unpkg.com/aos@2.3.4/dist/aos.css" rel="stylesheet">
+<style>body{background:radial-gradient(ellipse at 15% 15%,rgba(232,179,76,.1),transparent 38%),#0b0f14}input:focus{outline:2px solid #e8b34c;outline-offset:2px}</style></head>
+<body class="min-h-screen text-zinc-100 antialiased"><main class="mx-auto flex min-h-screen max-w-6xl items-center justify-center px-5 py-12">
+<section data-aos="fade-up" class="w-full max-w-md border border-white/10 bg-[#121a24] p-7 shadow-2xl shadow-black/30 sm:p-9">
+<div class="mb-8 flex items-center gap-3"><span class="grid h-11 w-11 place-items-center bg-amber-400 text-xl font-black text-[#17140d]">♪</span><div><p class="text-xs font-semibold uppercase tracking-[.18em] text-amber-300">Control desk</p><p class="text-xs text-zinc-500">Music bot</p></div></div>
+<h1 class="text-2xl font-semibold tracking-tight">Sign in</h1><p class="mt-2 text-sm text-zinc-400">Use the dashboard credentials configured for this bot.</p>
+${msg ? `<div role="alert" class="mt-5 border border-rose-400/30 bg-rose-400/10 px-3 py-2 text-sm text-rose-200">${escHtml(msg)}</div>` : ""}
+<form method="POST" action="/login" class="mt-7 space-y-4"><label class="block text-xs font-medium text-zinc-400">Username<input name="username" required autocomplete="username" class="mt-2 w-full border border-white/10 bg-[#0b0f14] px-3 py-3 text-sm text-zinc-100 placeholder:text-zinc-600" placeholder="Username"></label><label class="block text-xs font-medium text-zinc-400">Password<input name="password" type="password" required autocomplete="current-password" class="mt-2 w-full border border-white/10 bg-[#0b0f14] px-3 py-3 text-sm text-zinc-100 placeholder:text-zinc-600" placeholder="Password"></label><button class="w-full bg-amber-300 px-4 py-3 text-sm font-bold text-[#19150c] transition hover:bg-amber-200" type="submit">Continue</button></form>
+</section></main><script src="https://unpkg.com/aos@2.3.4/dist/aos.js"></script><script>AOS.init({once:true,duration:500,disable:window.matchMedia('(prefers-reduced-motion: reduce)').matches});</script></body></html>`;
+}
 // Shared design tokens + primitives for the dashboard and web player, so both
 // pages read from one console/rack aesthetic instead of duplicating CSS.
+function sharedDashCss() {
+  return `
+  :root{
+    --ink:#0b0f14;
+    --panel:#121a24;
+    --panel-2:#182230;
+    --line:#26323d;
+    --line-soft:#1c2630;
+    --text:#e8ecef;
+    --text-dim:#8fa0ac;
+    --amber:#e8b34c;
+    --blurple:#5865f2;
+    --bad:#f0654b;
+    --good:#4ade80;
+    --radius:10px;
+    --font-ui:'Space Grotesk',system-ui,-apple-system,sans-serif;
+    --font-mono:'IBM Plex Mono',ui-monospace,'SFMono-Regular',monospace;
+  }
+  *{box-sizing:border-box}
+  body{font-family:var(--font-ui);background:var(--ink);color:var(--text);margin:0;-webkit-font-smoothing:antialiased}
+  a{color:var(--amber);text-decoration:none}
+  a:hover{text-decoration:underline}
+  .wrap{max-width:920px;margin:0 auto;padding:28px 20px 60px}
+  .topbar{display:flex;align-items:center;justify-content:space-between;gap:16px;flex-wrap:wrap;padding-bottom:18px;border-bottom:1px solid var(--line)}
+  .status-pill{display:flex;align-items:center;gap:10px}
+  .dot{width:9px;height:9px;border-radius:50%;background:var(--good);box-shadow:0 0 0 3px rgba(74,222,128,.18)}
+  .botname{font-weight:600;font-size:16px;letter-spacing:.2px}
+  .meta{color:var(--text-dim);font-size:13px;font-family:var(--font-mono)}
+  nav.links{display:flex;gap:14px;font-size:13px;color:var(--text-dim)}
+  .banner{margin-top:16px;padding:10px 14px;border-radius:8px;font-size:13.5px;border:1px solid transparent}
+  .banner.ok{background:rgba(74,222,128,.08);border-color:rgba(74,222,128,.35);color:#c8f5d6}
+  .banner.err{background:rgba(240,101,75,.08);border-color:rgba(240,101,75,.4);color:#ffd2c7}
+  .module{margin-top:22px}
+  .module-head{display:flex;align-items:baseline;gap:10px;margin-bottom:10px}
+  .module-head h2{font-size:13px;margin:0;font-weight:600;letter-spacing:.3px;color:var(--text-dim)}
+  .module-head .rule{flex:1;height:1px;background:var(--line)}
+  .rack{background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);padding:18px}
+  .row{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
+  .row + .row{margin-top:12px}
+  select,input[type=text],input[type=number]{font-family:var(--font-ui);background:var(--panel-2);border:1px solid var(--line);color:var(--text);border-radius:7px;padding:9px 11px;font-size:13.5px}
+  select:focus,input:focus{outline:none;border-color:var(--amber)}
+  .field-label{font-size:11.5px;color:var(--text-dim);display:block;margin-bottom:4px}
+  .field{display:flex;flex-direction:column}
+  input#ctlQuery,input#q2{flex:1;min-width:200px}
+  button{font-family:var(--font-ui);background:var(--panel-2);border:1px solid var(--line);color:var(--text);font-weight:600;font-size:13.5px;padding:9px 15px;border-radius:7px;cursor:pointer;transition:border-color .15s ease}
+  button:hover{border-color:var(--amber)}
+  button.primary{background:var(--amber);border-color:var(--amber);color:#241a06}
+  button.primary:hover{filter:brightness(1.06)}
+  button.danger{background:transparent;border-color:var(--bad);color:var(--bad)}
+  button.danger:hover{background:rgba(240,101,75,.1)}
+  .transport{display:flex;gap:8px;align-items:center}
+  .transport button{min-width:44px}
+  code{font-family:var(--font-mono);background:var(--panel-2);padding:2px 6px;border-radius:5px;font-size:12.5px}
+  small{color:var(--text-dim)}
+  .msg-line{font-size:12.5px;color:var(--text-dim);min-height:16px;margin-top:8px}
+  .now-readout{margin-top:14px;padding:12px 14px;background:var(--panel-2);border:1px solid var(--line-soft);border-radius:8px;font-size:13.5px;line-height:1.6}
+  .cue-list{list-style:none;margin:0;padding:0}
+  .cue-list li{display:flex;gap:10px;padding:8px 0;border-bottom:1px solid var(--line-soft);font-size:13.5px}
+  .cue-list li:last-child{border-bottom:none}
+  .cue-idx{font-family:var(--font-mono);color:var(--amber);width:18px;flex-shrink:0}
+  .grid-2{display:grid;grid-template-columns:1.2fr 1fr;gap:16px}
+  @media (max-width:720px){.grid-2{grid-template-columns:1fr}}
+  textarea{width:100%;min-height:130px;background:var(--panel-2);color:var(--text);border:1px solid var(--line);border-radius:8px;padding:10px;font-family:var(--font-mono);font-size:12.5px;resize:vertical}
+  .eq{display:inline-flex;gap:2px;align-items:flex-end;height:14px;vertical-align:middle;margin-right:8px}
+  .eq span{width:3px;background:var(--amber);border-radius:1px;animation:eqbounce 900ms ease-in-out infinite}
+  .eq span:nth-child(2){animation-delay:150ms}
+  .eq span:nth-child(3){animation-delay:300ms}
+  .eq.paused span{animation-play-state:paused;opacity:.35}
+  @keyframes eqbounce{0%,100%{height:30%}50%{height:100%}}
+  input[type=range]{-webkit-appearance:none;appearance:none;height:4px;background:var(--line);border-radius:99px;outline:none}
+  input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:14px;height:14px;border-radius:50%;background:var(--amber);cursor:pointer;border:2px solid var(--ink)}
+  input[type=range]::-moz-range-thumb{width:14px;height:14px;border-radius:50%;background:var(--amber);cursor:pointer;border:2px solid var(--ink);border:none}
+  `;
+}
+function dashPage(status, msg = "", isErr = false) {
+  const q = status.queues.map((g) => `<li><span class="cue-idx">▸</span><div><b>${escHtml(g.name)}</b><br><small>${g.nowPlaying ? "▶ " + escHtml(g.nowPlaying) : "idle"} · ${g.queueCount} queued${g.next.length ? " · " + g.next.map(escHtml).join(" · ") : ""}</small></div></li>`).join("") || `<li><small>No guilds cached yet</small></li>`;
+  const c = status.cookies;
+  return `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Music Bot — Console</title>
+<link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>${sharedDashCss()}</style></head><body><div class="wrap">
+<div class="topbar">
+  <div class="status-pill"><span class="dot"></span><span class="botname">${escHtml(status.tag)}</span></div>
+  <div class="meta">${status.guilds} server${status.guilds === 1 ? "" : "s"} · up ${status.uptimeSec}s</div>
+  <nav class="links"><a href="/logout">Logout</a><a href="/web.html">Web player</a><a href="/api/status">JSON</a><a href="/health">Health</a></nav>
+</div>
+${msg ? `<div class="banner ${isErr ? "err" : "ok"}">${escHtml(msg)}</div>` : ""}
 
+<div class="module">
+  <div class="module-head"><h2>Control rack</h2><div class="rule"></div></div>
+  <div class="rack">
+    <div class="row">
+      <div class="field"><span class="field-label">Server</span><select id="ctlGuild"></select></div>
+      <div class="field"><span class="field-label">Voice channel</span><select id="ctlChan"></select></div>
+      <button onclick="ctlJoin()">Join</button><button onclick="ctlLeave()">Leave</button>
+    </div>
+    <div class="row">
+      <input id="ctlQuery" type="text" placeholder="song name or URL">
+      <button class="primary" onclick="ctlPlay()">Play</button>
+    </div>
+    <div class="row">
+      <div class="transport">
+        <button onclick="ctlDo('pause')" title="Pause">⏸</button>
+        <button onclick="ctlDo('resume')" title="Resume">▶</button>
+        <button onclick="ctlDo('skip')" title="Skip">⏭</button>
+        <button class="danger" onclick="ctlDo('stop')" title="Stop">⏹</button>
+      </div>
+      <button onclick="ctlDo('shuffle')">Shuffle</button>
+    </div>
+    <div class="row">
+      <div class="field"><span class="field-label">Volume %</span><input id="ctlVol" type="number" min="0" max="10000" step="10" style="width:100px"></div>
+      <button onclick="ctlVolSet()">Set</button>
+      <div class="field"><span class="field-label">Loop</span>
+        <select id="ctlLoop"><option value="off">off</option><option value="track">track</option><option value="queue">queue</option></select>
+      </div>
+      <button onclick="ctlLoopSet()">Set</button>
+    </div>
+    <div class="now-readout" id="ctlNow"></div>
+    <div class="msg-line" id="ctlMsg"><small></small></div>
+  </div>
+</div>
 
+<div class="grid-2">
+  <div class="module">
+    <div class="module-head"><h2>Queues</h2><div class="rule"></div></div>
+    <div class="rack"><ul class="cue-list">${q}</ul></div>
+  </div>
+  <div class="module">
+    <div class="module-head"><h2>YouTube sign-in</h2><div class="rule"></div></div>
+    <div class="rack">
+      <p style="font-size:12.5px;color:var(--text-dim);margin-top:0">Fixes <code>Please sign in / GVS PO Token</code>. Export with "Get cookies.txt LOCALLY" while signed into YouTube, paste below.</p>
+      <p style="font-size:13px">${c.exists ? `Signed in — <code>${escHtml(c.path)}</code> (${c.size}b, ${escHtml(c.mtime)})` : `Not signed in — expected at <code>${escHtml(c.path)}</code>`}</p>
+      <form method="POST" action="/cookies"><textarea name="cookiesText" placeholder="# Netscape HTTP Cookie File&#10;.youtube.com ..."></textarea><br><button class="primary" type="submit" style="margin-top:8px">Save cookies</button></form>
+      <form method="POST" action="/cookies/clear" style="margin-top:8px"><button class="danger" type="submit">Remove cookies</button></form>
+    </div>
+  </div>
+</div>
 
+<div class="module">
+  <div class="module-head"><h2>Utility</h2><div class="rule"></div></div>
+  <div class="rack"><form method="POST" action="/ytdlp-update"><button type="submit">Run yt-dlp update</button></form></div>
+</div>
+</div>
+<script>
+var CTL_G = [];
+function ctlSay(t){ var el = document.querySelector('#ctlMsg small'); if (el) el.textContent = t; }
+function ctlGid(){ var s = document.getElementById('ctlGuild'); return s && s.value ? s.value : ''; }
+async function ctlCall(path, data){
+  var r = await fetch(path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data || {}) });
+  var j = null; try { j = await r.json(); } catch (e) { throw new Error('bad response'); }
+  if (!r.ok || (j && j.error)) throw new Error((j && j.error) || ('HTTP ' + r.status));
+  return j;
+}
+async function ctlLoad(){
+  try {
+    var gs = await (await fetch('/api/guilds')).json();
+    CTL_G = gs;
+    var gsel = document.getElementById('ctlGuild');
+    gsel.innerHTML = '';
+    gs.forEach(function(g){
+      var o = document.createElement('option'); o.value = g.id; o.textContent = g.name + (g.botVC ? ' (bot in voice)' : ''); gsel.appendChild(o);
+    });
+    ctlGuildChanged(); ctlRefresh();
+  } catch (e) { ctlSay('load failed: ' + e.message); }
+}
+function ctlGuildChanged(){
+  var id = ctlGid();
+  var g = null;
+  CTL_G.forEach(function(x){ if (x.id === id) g = x; });
+  var csel = document.getElementById('ctlChan');
+  csel.innerHTML = '';
+  if (g) g.voice.forEach(function(c){
+    var o = document.createElement('option'); o.value = c.id; o.textContent = c.name + ' (' + c.members + ')'; csel.appendChild(o);
+  });
+}
+async function ctlJoin(){ try { var j = await ctlCall('/api/join', { guildId: ctlGid(), channelId: document.getElementById('ctlChan').value }); ctlSay('joined ' + j.channel); ctlLoad(); } catch (e) { ctlSay('join failed: ' + e.message); } }
+async function ctlLeave(){ try { await ctlCall('/api/leave', { guildId: ctlGid() }); ctlSay('left voice'); ctlLoad(); } catch (e) { ctlSay('leave failed: ' + e.message); } }
+async function ctlPlay(){ var q = document.getElementById('ctlQuery').value; if (!q) { ctlSay('type a song first'); return; } try { var j = await ctlCall('/api/play', { guildId: ctlGid(), query: q }); ctlSay('queued: ' + j.title); document.getElementById('ctlQuery').value = ''; ctlRefresh(); } catch (e) { ctlSay('play failed: ' + e.message); } }
+async function ctlDo(a){ try { var j = await ctlCall('/api/ctl', { guildId: ctlGid(), action: a }); ctlSay(a + ': ' + j.result); ctlRefresh(); } catch (e) { ctlSay(a + ' failed: ' + e.message); } }
+async function ctlVolSet(){ try { var j = await ctlCall('/api/volume', { guildId: ctlGid(), value: Number(document.getElementById('ctlVol').value) }); ctlSay('volume: ' + j.result); ctlRefresh(); } catch (e) { ctlSay('volume failed: ' + e.message); } }
+async function ctlLoopSet(){ try { var j = await ctlCall('/api/loop', { guildId: ctlGid(), mode: document.getElementById('ctlLoop').value }); ctlSay('loop: ' + j.result); ctlRefresh(); } catch (e) { ctlSay('loop failed: ' + e.message); } }
+function ctlEsc(s){ return String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;'); }
+async function ctlRefresh(){
+  var id = ctlGid(); if (!id) return;
+  try {
+    var gs = await (await fetch('/api/guilds')).json();
+    CTL_G = gs;
+    var g = null;
+    gs.forEach(function(x){ if (x.id === id) g = x; });
+    if (!g) return;
+    var h = '<b>Now:</b> ' + ctlEsc(g.nowPlaying ? g.nowPlaying.title : '— idle —') + ' · 🔊 ' + g.volume + '% · 🔁 ' + ctlEsc(g.loop) + ' · ' + ctlEsc(g.player);
+    if (g.queue && g.queue.length) { h += '<br><b>Queue:</b> ' + g.queue.map(function(x){ return ctlEsc(x.title); }).join(' | '); }
+    document.getElementById('ctlNow').innerHTML = h;
+    var v = document.getElementById('ctlVol'); if (v && document.activeElement !== v) v.value = g.volume;
+    var l = document.getElementById('ctlLoop'); if (l) l.value = g.loop;
+  } catch (e) {}
+}
+document.getElementById('ctlGuild').addEventListener('change', function(){ ctlGuildChanged(); ctlRefresh(); });
+setInterval(ctlRefresh, 10000);
+ctlLoad();
+</script>
+<div class="card"><h3>▶ Queues</h3><ul>${q}</ul></div>
+<div class="card"><h3>🍪 YouTube sign-in (cookies)</h3>
+<p><small>Fixes <code>Please sign in / GVS PO Token</code>. Export with “Get cookies.txt LOCALLY” while logged into YouTube, paste below.</small></p>
+<p>Status: ${c.exists ? `✅ <code>${escHtml(c.path)}</code> (${c.size} bytes, ${escHtml(c.mtime)})` : `❌ not found — expected at <code>${escHtml(c.path)}</code>`}</p>
+<form method="POST" action="/cookies"><textarea name="cookiesText" placeholder="# Netscape HTTP Cookie File&#10;.youtube.com ..."></textarea><br><button type="submit">Save cookies</button></form>
+<form method="POST" action="/cookies/clear" style="margin-top:6px"><button class="danger" type="submit">Remove cookies</button></form>
+</div>
+<div class="card"><h3>⚙️ yt-dlp</h3><form method="POST" action="/ytdlp-update"><button class="ghost" type="submit">Run yt-dlp update</button></form></div>
+</div></body></html>`;
+}
+function dashPageTailwind(status, msg = "", isErr = false) {
+  const queues = status.queues.map((guild) => `<li class="flex gap-3 border-b border-white/5 py-3 last:border-0"><span class="font-mono text-amber-300">/</span><div class="min-w-0"><strong class="text-sm">${escHtml(guild.name)}</strong><p class="mt-1 truncate text-xs text-zinc-400">${guild.nowPlaying ? "▶ " + escHtml(guild.nowPlaying) : "Idle"} · ${guild.queueCount} queued${guild.next.length ? " · " + guild.next.map(escHtml).join(" · ") : ""}</p></div></li>`).join("") || `<li class="py-3 text-sm text-zinc-500">No servers connected</li>`;
+  const cookies = status.cookies;
+  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Bocchi · Control Desk</title>
+<script src="https://cdn.tailwindcss.com"></script><link href="https://unpkg.com/aos@2.3.4/dist/aos.css" rel="stylesheet">
+<style>body{background-color:#090c10;background-image:linear-gradient(rgba(255,255,255,.025) 1px,transparent 1px),linear-gradient(90deg,rgba(255,255,255,.025) 1px,transparent 1px);background-size:32px 32px}input:focus,select:focus,textarea:focus{outline:2px solid #e8b34c;outline-offset:2px}button:focus-visible,a:focus-visible{outline:2px solid #e8b34c;outline-offset:3px} [data-aos]{will-change:transform,opacity}</style></head>
+<body class="min-h-screen text-zinc-100 antialiased"><div class="mx-auto max-w-7xl px-4 pb-16 sm:px-6 lg:px-8">
+<header class="flex flex-wrap items-center justify-between gap-4 border-b border-white/10 py-5" data-aos="fade-down"><div class="flex items-center gap-3"><span class="grid h-10 w-10 place-items-center bg-amber-300 text-xl font-black text-zinc-950">♪</span><div><p class="text-sm font-semibold">${escHtml(status.tag)}</p><p class="font-mono text-[11px] text-zinc-500">BOT CONTROL DESK</p></div></div><div class="flex items-center gap-4"><span class="inline-flex items-center gap-2 text-xs text-emerald-300"><i class="h-2 w-2 rounded-full bg-emerald-400"></i>Online</span><span class="font-mono text-xs text-zinc-400">${status.guilds} servers · ${status.uptimeSec}s uptime</span></div><nav class="flex gap-4 text-xs text-zinc-400"><a class="hover:text-amber-200" href="/web.html">Web player</a><a class="hover:text-amber-200" href="/api/status">Status</a><a class="hover:text-amber-200" href="/health">Health</a><a class="hover:text-rose-300" href="/logout">Logout</a></nav></header>
+<main><section class="flex flex-wrap items-end justify-between gap-4 py-8" data-aos="fade-up"><div><p class="font-mono text-xs uppercase text-amber-300">Music operations / Overview</p><h1 class="mt-2 text-3xl font-semibold tracking-tight sm:text-4xl">Control room<span class="text-amber-300">.</span></h1></div><div class="font-mono text-xs text-zinc-500">LIVE SYSTEM · ${escHtml(status.tag)}</div></section>
+${msg ? `<div role="alert" class="mb-5 border px-4 py-3 text-sm ${isErr ? "border-rose-400/30 bg-rose-400/10 text-rose-200" : "border-emerald-400/30 bg-emerald-400/10 text-emerald-200"}">${escHtml(msg)}</div>` : ""}
+<section class="mb-8 border border-white/10 bg-[#10151b]/95 p-5 sm:p-6" data-aos="fade-up"><div class="mb-5 flex items-center justify-between"><div><p class="font-mono text-[11px] uppercase text-zinc-500">01 / Transport</p><h2 class="mt-1 text-lg font-semibold">Playback controls</h2></div><span class="border border-amber-300/20 px-2 py-1 font-mono text-[10px] text-amber-200">REMOTE</span></div>
+<div class="grid gap-4 md:grid-cols-[1fr_1fr_auto_auto]"><label class="text-xs text-zinc-400">Server<select id="ctlGuild" class="mt-2 w-full border border-white/10 bg-[#090c10] px-3 py-3 text-sm text-zinc-100"></select></label><label class="text-xs text-zinc-400">Voice channel<select id="ctlChan" class="mt-2 w-full border border-white/10 bg-[#090c10] px-3 py-3 text-sm text-zinc-100"></select></label><button class="self-end bg-amber-300 px-5 py-3 text-sm font-semibold text-zinc-950 hover:bg-amber-200" onclick="ctlJoin()">Join voice</button><button class="self-end border border-white/15 px-5 py-3 text-sm text-zinc-200 hover:border-rose-300 hover:text-rose-200" onclick="ctlLeave()">Leave</button></div>
+<div class="mt-4 flex flex-wrap gap-2"><input id="ctlQuery" type="text" placeholder="Song name or URL" class="min-w-[220px] flex-1 border border-white/10 bg-[#090c10] px-3 py-3 text-sm text-white placeholder:text-zinc-600"><button class="bg-amber-300 px-5 py-3 text-sm font-semibold text-zinc-950 hover:bg-amber-200" onclick="ctlPlay()">Add to queue</button></div>
+<div class="mt-4 flex flex-wrap items-center gap-2"><div class="flex gap-2"><button class="h-11 w-12 border border-white/10 text-lg hover:border-amber-300" onclick="ctlDo('pause')" title="Pause">Ⅱ</button><button class="h-11 w-12 border border-white/10 text-lg hover:border-amber-300" onclick="ctlDo('resume')" title="Resume">▶</button><button class="h-11 w-12 border border-white/10 text-lg hover:border-amber-300" onclick="ctlDo('skip')" title="Skip">⏭</button><button class="h-11 w-12 border border-rose-400/30 text-lg text-rose-300 hover:bg-rose-400/10" onclick="ctlDo('stop')" title="Stop">■</button></div><button class="h-11 border border-white/10 px-4 text-sm hover:border-amber-300" onclick="ctlDo('shuffle')">Shuffle</button><div class="ml-auto flex flex-wrap items-end gap-3"><label class="text-xs text-zinc-500">Volume %<input id="ctlVol" type="number" min="0" max="10000" step="10" class="mt-1 block w-24 border border-white/10 bg-[#090c10] px-2 py-2 text-sm text-white"></label><button class="h-10 border border-white/10 px-3 text-xs hover:border-amber-300" onclick="ctlVolSet()">Set</button><label class="text-xs text-zinc-500">Loop<select id="ctlLoop" class="mt-1 block border border-white/10 bg-[#090c10] px-3 py-2 text-sm text-white"><option value="off">Off</option><option value="track">Track</option><option value="queue">Queue</option></select></label><button class="h-10 border border-white/10 px-3 text-xs hover:border-amber-300" onclick="ctlLoopSet()">Set</button></div></div>
+<div id="ctlNow" class="mt-5 border-l-2 border-amber-300 bg-black/20 px-4 py-3 text-sm leading-6 text-zinc-300"></div><p id="ctlMsg" class="mt-2 min-h-5 text-xs text-zinc-500"><small></small></p></section>
+<div class="grid gap-6 lg:grid-cols-[1.1fr_.9fr]"><section class="border border-white/10 bg-[#10151b]/95 p-5 sm:p-6" data-aos="fade-up"><div class="mb-4 flex items-end justify-between"><div><p class="font-mono text-[11px] uppercase text-zinc-500">02 / Queue</p><h2 class="mt-1 text-lg font-semibold">Server activity</h2></div><span class="font-mono text-xs text-zinc-500">${status.queues.length} active</span></div><ul class="divide-y divide-white/5">${queues}</ul></section>
+<section class="border border-white/10 bg-[#10151b]/95 p-5 sm:p-6" data-aos="fade-up" data-aos-delay="100"><div class="mb-4"><p class="font-mono text-[11px] uppercase text-zinc-500">03 / YouTube</p><h2 class="mt-1 text-lg font-semibold">Cookie session</h2></div><div class="mb-4 border border-white/5 bg-black/20 p-3 text-xs leading-5 text-zinc-400">${cookies.exists ? `Signed in · <span class="text-emerald-300">${cookies.size} bytes</span><br><code>${escHtml(cookies.path)}</code>` : `Not signed in<br>Expected at <code>${escHtml(cookies.path)}</code>`}</div><form method="POST" action="/cookies" class="space-y-3"><textarea name="cookiesText" placeholder="# Netscape HTTP Cookie File&#10;.youtube.com ..." class="min-h-32 w-full border border-white/10 bg-[#090c10] p-3 font-mono text-xs text-zinc-200 placeholder:text-zinc-600"></textarea><button class="w-full bg-amber-300 px-4 py-3 text-sm font-semibold text-zinc-950 hover:bg-amber-200" type="submit">Save cookies</button></form><form method="POST" action="/cookies/clear" class="mt-2"><button class="w-full border border-rose-400/30 px-4 py-3 text-sm text-rose-200 hover:bg-rose-400/10" type="submit">Remove cookies</button></form></section></div>
+<section class="mt-6 flex flex-wrap items-center justify-between gap-4 border border-white/10 bg-[#10151b]/95 p-5" data-aos="fade-up"><div><p class="font-mono text-[11px] uppercase text-zinc-500">04 / Maintenance</p><h2 class="mt-1 text-base font-semibold">yt-dlp</h2><p class="mt-1 text-xs text-zinc-500">Automatic updates ${status.ytAutoUpdate ? "enabled" : "disabled"}</p></div><form method="POST" action="/ytdlp-update"><button class="border border-white/15 px-4 py-3 text-sm hover:border-amber-300" type="submit">Run update</button></form></section>
+</main><footer class="mt-10 border-t border-white/10 pt-4 font-mono text-[10px] text-zinc-600">BOCCHI AUDIO SYSTEM · DASHBOARD</footer></div>
+<script src="https://unpkg.com/aos@2.3.4/dist/aos.js"></script><script>
+var CTL_G = [];
+function ctlSay(t){ var el = document.querySelector('#ctlMsg small'); if (el) el.textContent = t; }
+function ctlGid(){ var s = document.getElementById('ctlGuild'); return s && s.value ? s.value : ''; }
+async function ctlCall(path, data){var r=await fetch(path,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(data||{})});var j=null;try{j=await r.json()}catch(e){throw new Error('bad response')}if(!r.ok||(j&&j.error))throw new Error((j&&j.error)||('HTTP '+r.status));return j;}
+async function ctlLoad(){try{var gs=await(await fetch('/api/guilds')).json();CTL_G=gs;var gsel=document.getElementById('ctlGuild');gsel.innerHTML='';gs.forEach(function(g){var o=document.createElement('option');o.value=g.id;o.textContent=g.name+(g.botVC?' · in voice':'');gsel.appendChild(o)});ctlGuildChanged();ctlRefresh()}catch(e){ctlSay('load failed: '+e.message)}}
+function ctlGuildChanged(){var id=ctlGid();var g=CTL_G.find(function(x){return x.id===id});var csel=document.getElementById('ctlChan');csel.innerHTML='';if(g)g.voice.forEach(function(c){var o=document.createElement('option');o.value=c.id;o.textContent=c.name+' · '+c.members+' members';csel.appendChild(o)})}
+async function ctlJoin(){try{var j=await ctlCall('/api/join',{guildId:ctlGid(),channelId:document.getElementById('ctlChan').value});ctlSay('Joined '+j.channel);ctlLoad()}catch(e){ctlSay('Join failed: '+e.message)}}
+async function ctlLeave(){try{await ctlCall('/api/leave',{guildId:ctlGid()});ctlSay('Left voice');ctlLoad()}catch(e){ctlSay('Leave failed: '+e.message)}}
+async function ctlPlay(){var q=document.getElementById('ctlQuery').value;if(!q){ctlSay('Enter a song first.');return}try{var j=await ctlCall('/api/play',{guildId:ctlGid(),query:q});ctlSay('Queued: '+j.title);document.getElementById('ctlQuery').value='';ctlRefresh()}catch(e){ctlSay('Play failed: '+e.message)}}
+async function ctlDo(a){try{var j=await ctlCall('/api/ctl',{guildId:ctlGid(),action:a});ctlSay(a+': '+j.result);ctlRefresh()}catch(e){ctlSay(a+' failed: '+e.message)}}
+async function ctlVolSet(){try{var j=await ctlCall('/api/volume',{guildId:ctlGid(),value:Number(document.getElementById('ctlVol').value)});ctlSay('Volume: '+j.result+'%');ctlRefresh()}catch(e){ctlSay('Volume failed: '+e.message)}}
+async function ctlLoopSet(){try{var j=await ctlCall('/api/loop',{guildId:ctlGid(),mode:document.getElementById('ctlLoop').value});ctlSay('Loop: '+j.result);ctlRefresh()}catch(e){ctlSay('Loop failed: '+e.message)}}
+function ctlEsc(s){return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')}
+async function ctlRefresh(){var id=ctlGid();if(!id)return;try{var gs=await(await fetch('/api/guilds')).json();CTL_G=gs;var g=CTL_G.find(function(x){return x.id===id});if(!g)return;var h='<b>Now:</b> '+ctlEsc(g.nowPlaying?g.nowPlaying.title:'— idle —')+' · 🔊 '+g.volume+'% · 🔁 '+ctlEsc(g.loop)+' · '+ctlEsc(g.player);if(g.queue&&g.queue.length)h+='<br><b>Queue:</b> '+g.queue.map(function(x){return ctlEsc(x.title)}).join(' · ');document.getElementById('ctlNow').innerHTML=h;var v=document.getElementById('ctlVol');if(v&&document.activeElement!==v)v.value=g.volume;var l=document.getElementById('ctlLoop');if(l)l.value=g.loop}catch(e){}}
+document.getElementById('ctlGuild').addEventListener('change',function(){ctlGuildChanged();ctlRefresh()});
+if(window.AOS)AOS.init({once:true,duration:520,offset:22,disable:window.matchMedia('(prefers-reduced-motion: reduce)').matches});ctlLoad();setInterval(ctlRefresh,10000);
+</script></body></html>`;
+}
+function dashPlayerPageTailwind() {
+  return '<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Bocchi · Web Player</title>'
+  + '<script src="https://cdn.tailwindcss.com"></script><link href="https://unpkg.com/aos@2.3.4/dist/aos.css" rel="stylesheet">'
+  + '<style>body{background-color:#090c10;background-image:linear-gradient(rgba(255,255,255,.025) 1px,transparent 1px),linear-gradient(90deg,rgba(255,255,255,.025) 1px,transparent 1px);background-size:32px 32px}input:focus,select:focus{outline:2px solid #e8b34c;outline-offset:2px}</style></head><body class="min-h-screen text-zinc-100 antialiased">'
+  + '<main class="mx-auto max-w-5xl px-4 py-6 sm:px-6 sm:py-10"><header class="mb-8 flex flex-wrap items-center justify-between gap-4 border-b border-white/10 pb-5" data-aos="fade-down"><div class="flex items-center gap-3"><span class="grid h-10 w-10 place-items-center bg-amber-300 text-xl font-black text-zinc-950">♪</span><div><p class="text-sm font-semibold">Bocchi player</p><p class="font-mono text-[10px] text-zinc-500">LISTENING ROOM</p></div></div><div class="flex flex-wrap items-center gap-2"><a class="px-3 py-2 text-xs text-zinc-400 hover:text-amber-200" href="/dashboard">← Control desk</a><select id="srv" class="border border-white/10 bg-[#10151b] px-3 py-2 text-sm"></select><select id="chn" class="border border-white/10 bg-[#10151b] px-3 py-2 text-sm"></select><button class="border border-white/15 px-3 py-2 text-xs hover:border-amber-300" onclick="P.join()">Join voice</button><button class="border border-white/15 px-3 py-2 text-xs hover:border-rose-300" onclick="P.leave()">Leave</button></div></header>'
+  + '<section class="grid gap-6 lg:grid-cols-[minmax(0,1.2fr)_minmax(280px,.8fr)]" data-aos="fade-up"><div class="border border-white/10 bg-[#10151b] p-4 sm:p-6"><img id="cover" class="mb-5 hidden aspect-video w-full border border-white/10 object-cover" alt="Album art"><p class="font-mono text-[10px] uppercase text-amber-300">Now playing</p><h1 id="ttl" class="mt-2 break-words text-2xl font-semibold sm:text-3xl">— idle —</h1><p id="by" class="mt-2 text-sm text-zinc-400"></p>'
+  + '<div id="lyrics-container" class="mt-6 h-56 overflow-y-auto scroll-smooth rounded bg-[#090c10] p-4 text-center font-medium leading-loose text-zinc-400 hidden shadow-inner border border-white/5"></div>'
+  + '<div class="mt-6 flex flex-wrap items-center gap-2"><button class="h-11 w-12 border border-white/10 text-lg hover:border-amber-300" onclick="P.ctl(\'prev\')" title="Previous">⏮</button><button id="pp" class="h-11 w-12 bg-amber-300 text-lg text-zinc-950 hover:bg-amber-200" onclick="P.toggle()" title="Play or pause">▶</button><button class="h-11 w-12 border border-white/10 text-lg hover:border-amber-300" onclick="P.ctl(\'skip\')" title="Skip">⏭</button><button class="h-11 w-12 border border-rose-400/30 text-lg text-rose-300 hover:bg-rose-400/10" onclick="P.ctl(\'stop\')" title="Stop">■</button><button id="loopb" class="ml-auto border border-white/10 px-3 py-3 text-xs hover:border-amber-300" onclick="P.loop()">Loop · Off</button><button id="spdb" class="border border-white/10 px-3 py-3 text-xs hover:border-amber-300" onclick="P.speed()">1×</button></div>'
+  + '<div class="mt-5 flex flex-wrap items-center gap-3 border-t border-white/5 pt-5"><label class="font-mono text-xs text-zinc-500" for="vol">VOLUME</label><input id="vol" class="min-w-32 flex-1 accent-amber-300" type="range" min="0" max="200" value="100"><button class="border border-white/10 px-3 py-2 text-xs hover:border-amber-300" onclick="P.vol()">Apply</button></div><div class="mt-5 flex gap-2"><input id="q2" type="text" placeholder="Search or paste a link" class="min-w-0 flex-1 border border-white/10 bg-[#090c10] px-3 py-3 text-sm placeholder:text-zinc-600"><button class="bg-amber-300 px-4 py-3 text-sm font-semibold text-zinc-950 hover:bg-amber-200" onclick="P.play()">Queue</button></div><p id="msg" class="mt-3 min-h-5 text-xs text-zinc-500"></p></div>'
+  + '<aside class="border border-white/10 bg-[#10151b] p-4 sm:p-6" data-aos="fade-up" data-aos-delay="100"><div class="mb-4 flex items-end justify-between"><div><p class="font-mono text-[10px] uppercase text-zinc-500">Next tracks</p><h2 class="mt-1 text-lg font-semibold">Up next</h2></div><span class="text-amber-300">☷</span></div><ol id="q" class="divide-y divide-white/5 text-sm text-zinc-300"></ol></aside></section></main>'
+  + '<script src="https://unpkg.com/aos@2.3.4/dist/aos.js"></script><script>'
+  + 'var PG={g:[],id:"",snap:null,snapAt:0};'
+  + 'function say(t){document.getElementById("msg").textContent=t;}'
+  + 'function gid(){var s=document.getElementById("srv");return s&&s.value?s.value:"";}'
+  + 'async function api(p,d){var r=await fetch(p,{method:d?"POST":"GET",headers:{"Content-Type":"application/json"},body:d?JSON.stringify(d):undefined});var j=null;try{j=await r.json();}catch(e){}if(!r.ok||(j&&j.error))throw new Error((j&&j.error)||("HTTP "+r.status));return j;}'
+  + 'async function load(){try{var g=await(await fetch("/api/guilds")).json();PG.g=g;var s=document.getElementById("srv");var keep=s.value;s.innerHTML="";g.forEach(function(x){var o=document.createElement("option");o.value=x.id;o.textContent=x.name;if(x.id===keep)o.selected=true;s.appendChild(o);});if(!s.value&&g.length)s.value=g[0].id;chans();refresh();}catch(e){say("load failed: "+e.message);}}'
+  + 'function cur(){var id=gid();for(var i=0;i<PG.g.length;i++)if(PG.g[i].id===id)return PG.g[i];return null;}'
+  + 'function chans(){var g=cur();var c=document.getElementById("chn");c.innerHTML="";if(!g)return;(g.voice||[]).forEach(function(x){var o=document.createElement("option");o.value=x.id;o.textContent=x.name+" · "+x.members;if(g.botVC===x.id)o.selected=true;c.appendChild(o);});}'
+  + 'var P={'
+  + 'join:async function(){try{var j=await api("/api/join",{guildId:gid(),channelId:document.getElementById("chn").value});say("Joined "+j.channel);load();}catch(e){say("Join failed: "+e.message);}},'
+  + 'leave:async function(){try{await api("/api/leave",{guildId:gid()});say("Left voice");load();}catch(e){say(e.message);}},'
+  + 'play:async function(){var q=document.getElementById("q2").value;if(!q){say("Enter a song first.");return;}try{var j=await api("/api/play",{guildId:gid(),query:q});say("Queued: "+j.title);document.getElementById("q2").value="";refresh();}catch(e){say("Queue failed: "+e.message);}},'
+  + 'ctl:async function(a){try{var j=await api("/api/ctl",{guildId:gid(),action:a});say(j.result);refresh();}catch(e){say(e.message);}},'
+  + 'toggle:async function(){var g=cur();var paused=g&&g.player==="paused";try{var j=await api("/api/ctl",{guildId:gid(),action:paused?"resume":"pause"});say(j.result);refresh();}catch(e){say(e.message);}},'
+  + 'loop:async function(){var g=cur();var nx=g&&g.loop==="off"?"track":(g&&g.loop==="track"?"queue":"off");try{await api("/api/loop",{guildId:gid(),mode:nx});refresh();}catch(e){say(e.message);}},'
+  + 'speed:async function(){var g=cur();var speed=(g&&g.nowPlaying&&g.nowPlaying.speed)||1;try{var j=await api("/api/ctl",{guildId:gid(),action:"speed",value:speed===2?1:2});say("Speed "+j.result+"×");refresh();}catch(e){say(e.message);}},'
+  + 'vol:async function(){try{var j=await api("/api/volume",{guildId:gid(),value:Number(document.getElementById("vol").value)});say("Volume "+j.result+"%");refresh();}catch(e){say(e.message);}}'
+  + '};'
+  + 'async function refresh(){if(!gid())return;try{PG.g=await(await fetch("/api/guilds")).json();PG.snap=cur();PG.snapAt=Date.now();paint();}catch(e){}}'
+  + 'function paint(){var g=PG.snap;if(!g)return;var n=g.nowPlaying;document.getElementById("ttl").textContent=n?n.title:"— idle —";document.getElementById("by").textContent=n?"Requested by "+n.by:"Choose a server and queue a track.";var c=document.getElementById("cover");if(n&&n.thumb){c.classList.remove("hidden");c.src=n.thumb;}else{c.classList.add("hidden");c.removeAttribute("src");}'
+  + 'var lc=document.getElementById("lyrics-container");if(n&&n.lyrics&&n.lyrics.synced&&n.lyrics.synced.length){lc.classList.remove("hidden");if(lc.dataset.title!==n.title){lc.innerHTML="";lc.dataset.title=n.title;n.lyrics.synced.forEach(function(l){var p=document.createElement("p");p.className="lyric-line transition-all duration-300";p.dataset.time=l.time;p.textContent=l.text||"♪";lc.appendChild(p);});}var sp=n.speed||1;var base=n.posBase||0;var t0=n.startedAt||PG.snapAt;var el=base+Math.max(0,(Date.now()-t0)/1000)*sp;var lines=Array.from(lc.children);var aIdx=-1;for(var i=0;i<lines.length;i++){if(parseFloat(lines[i].dataset.time)<=el)aIdx=i;else break;}lines.forEach(function(p,i){if(i===aIdx){if(!p.classList.contains("active")){p.classList.add("active");p.style.color="#fcd34d";p.style.transform="scale(1.1)";lc.scrollTop=p.offsetTop-lc.offsetTop-(lc.clientHeight/2)+(p.clientHeight/2);}}else{p.classList.remove("active");p.style.color="";p.style.transform="";}});}else{lc.classList.add("hidden");lc.dataset.title="";}'
+  + 'document.getElementById("pp").textContent=g.player==="paused"?"▶":"Ⅱ";document.getElementById("loopb").textContent="Loop · "+g.loop;document.getElementById("spdb").textContent=((n&&n.speed)||1)+"×";var v=document.getElementById("vol");if(document.activeElement!==v)v.value=g.volume;var q=document.getElementById("q");q.innerHTML="";(g.queue||[]).forEach(function(x){var li=document.createElement("li");li.className="flex gap-3 py-3";var index=document.createElement("span");index.className="font-mono text-xs text-amber-300";index.textContent=String(q.children.length+1).padStart(2,"0");var title=document.createElement("span");title.className="min-w-0 truncate";title.textContent=x.title||"";li.appendChild(index);li.appendChild(title);q.appendChild(li);});if(!q.children.length){var empty=document.createElement("li");empty.className="py-4 text-sm text-zinc-500";empty.textContent="Queue is empty";q.appendChild(empty);}}'
+  + 'document.getElementById("srv").addEventListener("change",function(){chans();refresh();});if(window.AOS)AOS.init({once:true,duration:520,offset:22,disable:window.matchMedia("(prefers-reduced-motion: reduce)").matches});setInterval(refresh,5000);setInterval(paint,500);load();'
+  + '</script></body></html>';
+}
 
-
-
+function dashPlayerPage() {
+  return '<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Music Bot — Web Player</title>'
+  + '<style>body{font-family:system-ui;background:#0b1020;color:#e2e8f0;margin:0;padding:20px}.wrap{max-width:720px;margin:0 auto}.top{display:flex;gap:8px;align-items:center;margin-bottom:12px;flex-wrap:wrap}a{color:#93c5fd}select,input[type=text]{padding:8px;border-radius:8px;border:1px solid #334155;background:#020617;color:#e2e8f0}.card{background:#141b31;border:1px solid #263154;padding:18px;border-radius:14px;margin:12px 0}.cover{width:100%;max-height:340px;object-fit:cover;border-radius:10px;background:#000;display:none}#ttl{font-size:20px;font-weight:800;margin:12px 0 2px}#by{color:#94a3b8;font-size:13px}#barwrap{margin:14px 0 4px;cursor:pointer}#bar{height:8px;background:#263154;border-radius:99px;position:relative}#fill{height:100%;width:0%;background:#5865F2;border-radius:99px}#knob{width:14px;height:14px;background:#fff;border-radius:99px;position:absolute;top:-3px;left:0%}#times{display:flex;justify-content:space-between;font-size:12px;color:#94a3b8}.row{display:flex;gap:8px;margin-top:12px;flex-wrap:wrap;align-items:center}button{padding:10px 16px;border:0;border-radius:10px;background:#5865F2;color:#fff;font-weight:700;cursor:pointer;font-size:15px}.ghost{background:#334155}.danger{background:#b91c1c}.vol{display:flex;gap:8px;align-items:center}input[type=range]{width:140px}#q{margin:8px 0 0;padding-left:20px;font-size:14px}#msg{color:#94a3b8;font-size:13px;min-height:18px}</style></head><body><div class="wrap">'
+  + '<div class="top"><a href="/dashboard">← Dashboard</a><select id="srv"></select><select id="chn"></select><button class="ghost" onclick="P.join()">Join</button><button class="ghost" onclick="P.leave()">Leave</button></div>'
+  + '<div class="card"><img id="cover" class="cover" alt=""><div id="ttl">— idle —</div><div id="by"></div>'
+  + '<div id="lyrics-container" style="display:none; height:220px; overflow-y:auto; scroll-behavior:smooth; margin:16px 0; padding:12px; background:#020617; border-radius:8px; border:1px solid #334155; text-align:center; color:#94a3b8; font-size:15px; line-height:1.8;"></div>'
+  + '<div id="barwrap" onclick="P.seek(event)"><div id="bar"><div id="fill"></div><div id="knob"></div></div></div>'
+  + '<div id="times"><span id="tcur">0:00</span><span id="ttot">• LIVE</span></div>'
+  + '<div class="row"><button onclick="P.ctl(\'prev\')">⏮</button><button id="pp" onclick="P.toggle()">▶</button><button onclick="P.ctl(\'skip\')">⏭</button><button class="danger" onclick="P.ctl(\'stop\')">⏹</button><button class="ghost" id="loopb" onclick="P.loop()">🔁 off</button><button class="ghost" id="spdb" onclick="P.speed()">1x</button></div>'
+  + '<div class="row vol"><span>🔊</span><input id="vol" type="range" min="0" max="200" value="100"><button class="ghost" onclick="P.vol()">Set</button></div>'
+  + '<div class="row"><input id="q2" type="text" placeholder="song name or URL" style="flex:1;min-width:200px"><button onclick="P.play()">+ Queue</button></div>'
+  + '<div id="msg"></div></div>'
+  + '<div class="card"><h3 style="margin:0 0 8px">📋 Up next</h3><ol id="q"></ol></div>'
+  + '</div><script>'
+  + 'var PG={g:[],id:"",snap:null,snapAt:0};'
+  + 'function esc(s){return String(s==null?"":s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");}'
+  + 'function say(t){document.getElementById("msg").textContent=t;}'
+  + 'function gid(){var s=document.getElementById("srv");return s&&s.value?s.value:"";}'
+  + 'function fmt(s){if(s==null||!isFinite(s)||s<0)return"• LIVE";s=Math.floor(s);var m=Math.floor(s/60);s=s%60;return m+":"+(s<10?"0":"")+s;}'
+  + 'async function api(p,d){var r=await fetch(p,{method:d?"POST":"GET",headers:{"Content-Type":"application/json"},body:d?JSON.stringify(d):undefined});var j=null;try{j=await r.json();}catch(e){}if(!r.ok||(j&&j.error))throw new Error((j&&j.error)||("HTTP "+r.status));return j;}'
+  + 'async function load(){try{var g=await(await fetch("/api/guilds")).json();PG.g=g;var s=document.getElementById("srv");var keep=s.value;s.innerHTML="";g.forEach(function(x){var o=document.createElement("option");o.value=x.id;o.textContent=x.name;if(x.id===keep)o.selected=true;s.appendChild(o);});if(!s.value&&g.length)s.value=g[0].id;chans();refresh();}catch(e){say("load failed: "+e.message);}}'
+  + 'function cur(){var id=gid();for(var i=0;i<PG.g.length;i++)if(PG.g[i].id===id)return PG.g[i];return null;}'
+  + 'function chans(){var g=cur();var c=document.getElementById("chn");c.innerHTML="";if(!g)return;(g.voice||[]).forEach(function(x){var o=document.createElement("option");o.value=x.id;o.textContent=x.name+" ("+x.members+")";if(g.botVC===x.id)o.selected=true;c.appendChild(o);});}'
+  + 'var P={'
+  + 'join:async function(){try{var j=await api("/api/join",{guildId:gid(),channelId:document.getElementById("chn").value});say("joined "+j.channel);load();}catch(e){say("join failed: "+e.message);}},'
+  + 'leave:async function(){try{await api("/api/leave",{guildId:gid()});say("left");load();}catch(e){say(e.message);}},'
+  + 'play:async function(){var q=document.getElementById("q2").value;if(!q){say("type a song first");return;}try{var j=await api("/api/play",{guildId:gid(),query:q});say("queued: "+j.title);document.getElementById("q2").value="";refresh();}catch(e){say("play failed: "+e.message);}},'
+  + 'ctl:async function(a){try{var j=await api("/api/ctl",{guildId:gid(),action:a});say(a+": "+j.result);refresh();}catch(e){say(e.message);}},'
+  + 'toggle:async function(){var g=cur();var paused=g&&g.player==="paused";try{var j=await api("/api/ctl",{guildId:gid(),action:paused?"resume":"pause"});say(j.result);refresh();}catch(e){say(e.message);}},'
+  + 'loop:async function(){var g=cur();var nx=g&&g.loop==="off"?"track":(g&&g.loop==="track"?"queue":"off");try{await api("/api/loop",{guildId:gid(),mode:nx});refresh();}catch(e){say(e.message);}},'
+  + 'speed:async function(){var g=cur();var curSpd=(g&&g.nowPlaying&&g.nowPlaying.speed)||1;var v=(curSpd===2)?1:2;try{var j=await api("/api/ctl",{guildId:gid(),action:"speed",value:v});say("speed "+j.result+"x");refresh();}catch(e){say(e.message);}},'
+  + 'vol:async function(){try{var j=await api("/api/volume",{guildId:gid(),value:Number(document.getElementById("vol").value)});say("volume "+j.result);refresh();}catch(e){say(e.message);}},'
+  + 'seek:async function(ev){var g=cur();if(!g||!g.nowPlaying||!g.nowPlaying.durationSec){say("live stream — cannot seek");return;}var r=document.getElementById("bar").getBoundingClientRect();var ratio=(ev.clientX-r.left)/r.width;ratio=Math.max(0,Math.min(1,ratio));var sec=Math.floor(ratio*g.nowPlaying.durationSec);try{await api("/api/seek",{guildId:gid(),seconds:sec});say("seek → "+fmt(sec));refresh();}catch(e){say(e.message);}}'
+  + '};'
+  + 'async function refresh(){var id=gid();if(!id)return;try{var gs=await(await fetch("/api/guilds")).json();PG.g=gs;var g=cur();if(!g)return;PG.snap=g;PG.snapAt=Date.now();paint();}catch(e){}}'
+  + 'function paint(){var g=PG.snap;if(!g)return;var np=g.nowPlaying;document.getElementById("ttl").textContent=np?np.title:"— idle —";document.getElementById("by").textContent=np?("by "+np.by):"";var cv=document.getElementById("cover");if(np&&np.thumb){cv.style.display="block";if(cv.src!==np.thumb)cv.src=np.thumb;}else{cv.style.display="none";cv.removeAttribute("src");}'
+  + 'var lc=document.getElementById("lyrics-container");if(np&&np.lyrics&&np.lyrics.synced&&np.lyrics.synced.length){lc.style.display="block";if(lc.dataset.title!==np.title){lc.innerHTML="";lc.dataset.title=np.title;np.lyrics.synced.forEach(function(l){var p=document.createElement("p");p.style.transition="all 0.3s";p.dataset.time=l.time;p.textContent=l.text||"♪";lc.appendChild(p);});}var sp=np.speed||1;var base=np.posBase||0;var t0=np.startedAt||PG.snapAt;var el=base+Math.max(0,(Date.now()-t0)/1000)*sp;var lines=Array.from(lc.children);var aIdx=-1;for(var i=0;i<lines.length;i++){if(parseFloat(lines[i].dataset.time)<=el)aIdx=i;else break;}lines.forEach(function(p,i){if(i===aIdx){if(p.dataset.active!=="1"){p.dataset.active="1";p.style.color="#fcd34d";p.style.transform="scale(1.1)";p.style.fontWeight="bold";lc.scrollTop=p.offsetTop-lc.offsetTop-(lc.clientHeight/2)+(p.clientHeight/2);}}else{p.dataset.active="0";p.style.color="";p.style.transform="";p.style.fontWeight="";}});}else{lc.style.display="none";lc.dataset.title="";}'
+  + 'var dur=np&&np.durationSec?np.durationSec:null;var sp=(np&&np.speed)||1;var base=(np&&np.posBase)||0;var t0=(np&&np.startedAt)||PG.snapAt;var el=base+Math.max(0,(Date.now()-t0)/1000)*sp;'
+  + 'document.getElementById("tcur").textContent=fmt(el);document.getElementById("ttot").textContent=dur?fmt(dur):"• LIVE";'
+  + 'var pct=dur?Math.max(0,Math.min(100,el/dur*100)):0;document.getElementById("fill").style.width=pct+"%";document.getElementById("knob").style.left=pct+"%";'
+  + 'document.getElementById("pp").textContent=(g.player==="paused")?"▶":"⏸";'
+  + 'document.getElementById("loopb").textContent="🔁 "+g.loop;document.getElementById("spdb").textContent=(np&&np.speed===2)?"2x":"1x";'
+  + 'var v=document.getElementById("vol");if(v&&document.activeElement!==v)v.value=g.volume;'
+  + 'var q=document.getElementById("q");q.innerHTML="";(g.queue||[]).forEach(function(x){var li=document.createElement("li");li.textContent=x.title;q.appendChild(li);});if(!(g.queue||[]).length){var li=document.createElement("li");li.textContent="— empty —";q.appendChild(li);}}'
+  + 'document.getElementById("srv").addEventListener("change",function(){chans();refresh();});'
+  + 'setInterval(refresh,5000);setInterval(paint,500);load();'
+  + '</scr' + 'ipt></body></html>';
+}
 function startDashboard() {
   const server = http.createServer(async (req, res) => {
     try {
