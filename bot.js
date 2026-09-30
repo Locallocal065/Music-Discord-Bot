@@ -2833,28 +2833,23 @@ async function startPlayback(guild, item, state, stayPut = false) {
     source = `ytsearch1:${source}`;
   }
 
-  // TikTok: metadata (title/thumb) via TikWM, audio fetched with node-fetch
-  // and piped to ffmpeg stdin. Works for /video/ AND /photo/ posts (yt-dlp
-  // can't handle photo URLs at all). Falls back to yt-dlp pipe on failure.
+  // TikTok: metadata (title/thumb) via TikWM, audio streamed by passing the
+  // CDN URL + spoofed headers directly to ffmpeg (avoids Railway/cloud datacenter
+  // 403s that occur when Node fetch() hits TikTok CDN). Falls back to yt-dlp.
   if (isTikTokUrl(source)) {
     try {
       const meta = await tiktokMeta(source);
       if (item.title === item.source) item.title = meta.title;
       if (!item.thumb && meta.thumb) item.thumb = meta.thumb;
       logPretty("LOG", `[tikwm] audio <- ${meta.audioUrl.slice(0, 90)}...`);
-      const res = await fetch(meta.audioUrl, {
-        headers: {
-          "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36",
-          "Referer": "https://www.tiktok.com/",
-        }
-      });
-      if (!res.ok || !res.body) throw new Error('tiktok audio HTTP ' + res.status);
-      const pipeObj = spawnFfmpegStdin("tiktok", consumeOffset(item, state));
-      Readable.fromWeb(res.body).on("error", swallowPipeError).pipe(pipeObj.ff.stdin);
+      // Pass the CDN URL + headers directly to ffmpeg instead of fetch()-piping.
+      // ffmpeg handles TikTok CDN better from cloud IPs than Node's fetch().
+      const headers = "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36\r\nReferer: https://www.tiktok.com/\r\n";
+      const pipeObj = spawnFfmpegFromDirectUrl(meta.audioUrl, headers);
       await playPipe(guild, item, state, pipeObj);
       return { pageUrl: source };
     } catch (e) {
-      logPretty("WARN", "tiktok direct failed, falling back to yt-dlp: " + (e?.message || e));
+      logPretty("WARN", `[tikwm] ffmpeg direct failed (${e?.message || e}), falling back to yt-dlp`);
     }
   }
 
