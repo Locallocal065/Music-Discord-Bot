@@ -734,7 +734,6 @@ const client = new Client({
 _clientForPing = client;
 
 // --- Prefix commands (e.g., n!play ...) ---
-const BOT_PREFIX = (process.env.BOT_PREFIX || process.env.COMMAND_PREFIX || "n!").trim();
 // NOTE: avoid process.env.PREFIX because Termux sets PREFIX=/data/... by default.
 
 // ================= Discord UI (buttons + YouTube sign-in) =================
@@ -820,7 +819,7 @@ function buildControlRows(state = null) {
 }
 function buildPanelEmbed(guild) {
   const st = getGuildState(guild);
-  const cur = st.current ? `**${st.current.title}**\n👤 ${st.current.requestedBy}` : "— idle —\nuse `/play` or `n!play` to add songs";
+  const cur = st.current ? `**${st.current.title}**\n👤 ${st.current.requestedBy}` : "— idle —\nuse `/play` or `/play` to add songs";
   const next = st.queue.slice(0, 3).map((x, i) => `\`${i + 1}.\` ${x.title}`).join("\n") || "—";
   const ck = ytCookiesStatus();
   const room = getSavedControlChannel(guild.id) ? `<#${getSavedControlChannel(guild.id)}>` : "#bocchi (auto)";
@@ -985,68 +984,6 @@ async function handleMusicButton(itx) {
   return itx.reply({ content: "?", flags: MessageFlags.Ephemeral });
 }
 
-function buildHelpEmbedPrefix() {
-  const p = BOT_PREFIX;
-  return new EmbedBuilder()
-    .setColor(0x5865F2)
-    .setTitle("🎵 Music Bot — User Guide")
-    .setDescription(`> Use prefix commands **\`${p}\`** Example: \`${p}play lofi hip hop\`\n> Supports **YouTube · SoundCloud · TikTok · Spotify** (track)`)
-    .addFields(
-      {
-        name: "╔══════════════════════════╗",
-        value: "** ** ",
-        inline: false,
-      },
-      {
-        name: "🎶 Play & queue",
-        value: [
-          `\`${p}play <name/URL>\` — Play or queue a song`,
-          `\`${p}playlist <URL/search> --limit N\` — Load songs in bulk`,
-          `\`${p}queue\` — Show the full queue`,
-          `\`${p}np\` — Currently playing song`,
-          `\`${p}remove <number>\` — Remove from queue`,
-          `\`${p}shuffle\` — Shuffle the queue`,
-        ].join("\n"),
-        inline: false,
-      },
-      {
-        name: "⏯️ Playback",
-        value: [
-          `\`${p}skip\` — Skip the current song`,
-          `\`${p}pause\` — Pause`,
-          `\`${p}resume\` — Resume`,
-          `\`${p}stop\` — Stop and clear the whole queue`,
-        ].join("\n"),
-        inline: true,
-      },
-      {
-        name: "🔊 Volume & loop",
-        value: [
-          `\`${p}volume <0-10000>\` — Adjust the volume`,
-          `\`${p}loop off\` — Loop off`,
-          `\`${p}loop track\` — Loop the current track`,
-          `\`${p}loop queue\` — Loop the whole queue`,
-        ].join("\n"),
-        inline: true,
-      },
-      {
-        name: "⚙️ System",
-        value: [
-          `\`${p}ping\` — Check latency`,
-          `\`${p}botupdate\` — Update yt-dlp`,
-          `\`${p}help\` — Show this guide`,
-        ].join("\n"),
-        inline: false,
-      },
-      {
-        name: "╚══════════════════════════╝",
-        value: "** **",
-        inline: false,
-      },
-    )
-    .setFooter({ text: "💡 Shortcut: n!p = play · n!q = queue · n!s = skip · n!h = help", iconURL: "https://cdn.discordapp.com/emojis/1009293917116919808.webp" })
-    .setTimestamp();
-}
 
 function buildHelpEmbedSlash() {
   return new EmbedBuilder()
@@ -1114,7 +1051,7 @@ function buildHelpEmbedSlash() {
         inline: false,
       },
     )
-    .setFooter({ text: "💡 Tip: prefix commands via n!help are faster!" })
+    .setFooter({ text: "💡 Tip: prefix commands via /help are faster!" })
     .setTimestamp();
 }
 
@@ -1535,12 +1472,12 @@ async function runDmMusicCommand(msg, guild, cmd, parts) {
     return reply({ content: `Music controls are in <#${ref.channelId}> (server **${guild.name}**).` });
   }
   if (cmd === "np") {
-    if (!state.current) return reply({ embeds: [infoEmbed("🎵 Nothing playing", `Use \`${BOT_PREFIX}play <song>\` to start`)] });
+    if (!state.current) return reply({ embeds: [infoEmbed("🎵 Nothing playing", `Use \`/play <song>\` to start`)] });
     const lyrNp = await fetchLyrics(state.current.title).catch(() => null);
     return reply({ embeds: [buildNowPlayingEmbed(state, lyrNp)] });
   }
   if (cmd === "queue") {
-    if (!state.queue.length) return reply({ embeds: [infoEmbed("📭 Queue is empty", `Use \`${BOT_PREFIX}play <song>\` to add songs`)] });
+    if (!state.queue.length) return reply({ embeds: [infoEmbed("📭 Queue is empty", `Use \`/play <song>\` to add songs`)] });
     const lines = state.queue.slice(0, 10).map((x, i) => `\`${String(i + 1).padStart(2, "0")}.\` **${x.title}**\n　　👤 ${x.requestedBy}`).join("\n");
     const more = state.queue.length > 10 ? `\n*… and **${state.queue.length - 10}** tracks*` : "";
     return reply({
@@ -1556,8 +1493,8 @@ async function runDmMusicCommand(msg, guild, cmd, parts) {
   }
   if (cmd === "play") {
     const q = parts.join(" ").trim();
-    if (!q) return reply({ embeds: [errorEmbed(`Please give a song name or link\n**Example:** \`${BOT_PREFIX}play lofi hip hop\``)] });
-    if (!userVC) return reply({ embeds: [errorEmbed(`I'm not in a voice room in **${guild.name}** yet — run \`${BOT_PREFIX}setup\` in the server first.`)] });
+    if (!q) return reply({ embeds: [errorEmbed(`Please give a song name or link\n**Example:** \`/play lofi hip hop\``)] });
+    if (!userVC) return reply({ embeds: [errorEmbed(`I'm not in a voice room in **${guild.name}** yet — run \`/setup\` in the server first.`)] });
     const item = { title: q, source: q, requestedBy: msg.author.tag, guild, voiceChannelId: userVC, textChannelId };
     state.queue.push(item);
     const shouldStart = !state.current;
@@ -1580,8 +1517,8 @@ async function runDmMusicCommand(msg, guild, cmd, parts) {
   if (cmd === "playlist") {
     const parsed = parseLimitFromArgs(parts);
     const q = parsed.tokens.join(" ").trim();
-    if (!q) return reply({ embeds: [errorEmbed(`Please give a playlist link or search text\n**Example:** \`${BOT_PREFIX}playlist lofi playlist --limit 20\``)] });
-    if (!userVC) return reply({ embeds: [errorEmbed(`I'm not in a voice room in **${guild.name}** yet — run \`${BOT_PREFIX}setup\` in the server first.`)] });
+    if (!q) return reply({ embeds: [errorEmbed(`Please give a playlist link or search text\n**Example:** \`/playlist lofi playlist --limit 20\``)] });
+    if (!userVC) return reply({ embeds: [errorEmbed(`I'm not in a voice room in **${guild.name}** yet — run \`/setup\` in the server first.`)] });
     const items = await fetchPlaylistEntries(q, parsed.limit);
     if (!items.length) return reply({ embeds: [errorEmbed("No songs found in the playlist or search results")] });
     for (const { title, url, thumb, durationSec } of items) {
@@ -1623,11 +1560,11 @@ async function runDmMusicCommand(msg, guild, cmd, parts) {
     markNpStopped(guild).catch(() => { });
     return reply({ embeds: [successEmbed("🛑 Stopped", "Queue cleared and left voice")] });
   }
-  if (cmd === "pause") { state.player.pause(); return reply({ embeds: [infoEmbed("⏸️ Paused", `Type \`${BOT_PREFIX}resume\` to resume`)] }); }
+  if (cmd === "pause") { state.player.pause(); return reply({ embeds: [infoEmbed("⏸️ Paused", `Type \`/resume\` to resume`)] }); }
   if (cmd === "resume") { state.player.unpause(); return reply({ embeds: [successEmbed("▶️ Resumed", `Now playing: **${state.current?.title || "—"}**`)] }); }
   if (cmd === "volume") {
     const value = parseInt(parts[0], 10);
-    if (Number.isNaN(value)) return reply({ embeds: [errorEmbed(`Please give a volume number (0-10000)\n**Example:** \`${BOT_PREFIX}volume 80\``)] });
+    if (Number.isNaN(value)) return reply({ embeds: [errorEmbed(`Please give a volume number (0-10000)\n**Example:** \`/volume 80\``)] });
     setVolumePct(state, value);
     const bar = "█".repeat(Math.round(Math.min(state.volumePct, 200) / 20)) + "░".repeat(10 - Math.round(Math.min(state.volumePct, 200) / 20));
     return reply({ embeds: [successEmbed("🔊  Volume updated", `\`${bar}\` **${state.volumePct}%**`)] });
@@ -1644,7 +1581,7 @@ async function runDmMusicCommand(msg, guild, cmd, parts) {
   }
   if (cmd === "remove") {
     const index = parseInt(parts[0], 10);
-    if (Number.isNaN(index) || index < 1) return reply({ embeds: [errorEmbed(`Please give the queue number to remove\n**Example:** \`${BOT_PREFIX}remove 3\``)] });
+    if (Number.isNaN(index) || index < 1) return reply({ embeds: [errorEmbed(`Please give the queue number to remove\n**Example:** \`/remove 3\``)] });
     if (index > state.queue.length) return reply({ embeds: [errorEmbed(`Number is past the queue end (${state.queue.length} tracks)`)] });
     const [rm] = state.queue.splice(index - 1, 1);
     return reply({ embeds: [successEmbed("🗑️  Removed from queue", `**${rm?.title || "Unknown"}**`)] });
@@ -1654,7 +1591,7 @@ async function runDmMusicCommand(msg, guild, cmd, parts) {
 async function handleDmMessage(msg) {
   const raw = String(msg.content || "").trim();
   if (!raw) return;
-  const looksLikeCommand = raw.startsWith(BOT_PREFIX) || raw.startsWith("/");
+  const looksLikeCommand = raw.startsWith("/");
   const stripped = raw.startsWith(BOT_PREFIX) ? raw.slice(BOT_PREFIX.length).trim()
     : raw.startsWith("/") ? raw.slice(1).trim() : raw;
   const parts = stripped.split(/\s+/).filter(Boolean);
@@ -1664,9 +1601,9 @@ async function handleDmMessage(msg) {
 
   if (stripped && (looksLikeCommand || known)) {
     if (DM_BLOCKED_COMMANDS.has(cmd)) {
-      return msg.reply({ embeds: [errorEmbed(`🔒 \`${BOT_PREFIX}${cmd}\` is filtered out of private chat — it is a server/admin command. Use it in the server's #bocchi room.`)] });
+      return msg.reply({ embeds: [errorEmbed(`🔒 \`/${cmd}\` is filtered out of private chat — it is a server/admin command. Use it in the server's #bocchi room.`)] });
     }
-    if (cmd === "help") return msg.reply({ embeds: [buildHelpEmbedPrefix()] });
+    if (cmd === "help") return msg.reply({ embeds: [buildHelpEmbedSlash()] });
     if (cmd === "ping") {
       return msg.reply({
         embeds: [makeEmbed(COLORS.info).setDescription("### 🏓  Pong!").addFields({ name: "🌐 WebSocket", value: `\`${Math.round(client.ws.ping)} ms\``, inline: true })]
@@ -1726,348 +1663,6 @@ client.on("messageCreate", async (msg) => {
     if (msg.channelId === getSavedAiChannel(msg.guild.id)) {
       await handleAiChatMessage(msg);
       return;
-    }
-
-    const raw = (msg.content || "").trim();
-    if (!raw.startsWith(BOT_PREFIX)) return;
-
-    const body = raw.slice(BOT_PREFIX.length).trim();
-    if (!body) return;
-
-    const parts = body.split(/\s+/);
-    const cmdRaw = (parts.shift() || "").toLowerCase();
-
-    const cmd = ({
-      p: "play",
-      q: "queue",
-      now: "np",
-      next: "skip",
-      s: "skip",
-      st: "stop",
-      vol: "volume",
-      upd: "botupdate",
-      h: "help",
-      help: "help",
-      panel: "panel",
-      controls: "panel",
-    })[cmdRaw] || cmdRaw;
-
-    // Log every prefix command
-    logPretty("PREFIX", `${BOT_PREFIX}${cmd}`, {
-      user: msg.author.tag,
-      guild: msg.guild.name,
-    });
-
-    const allowed = new Set(["help", "play", "playlist", "skip", "stop", "pause", "resume", "queue", "np", "remove", "shuffle", "loop", "volume", "ping", "botupdate", "panel", "setup", "ytstatus", "ytsignin", "ytsignout", "video", "watchtogether", "vstate"]);
-    if (!allowed.has(cmd)) {
-      return msg.reply({
-        embeds: [
-          errorEmbed(`Unknown command \`${BOT_PREFIX}${cmdRaw}\``)
-            .addFields({ name: "💡 Available commands", value: Array.from(allowed).map(c => `\`${BOT_PREFIX}${c}\``).join(" ") })
-        ]
-      });
-    }
-
-    if (cmd === "help") {
-      return msg.reply({ embeds: [buildHelpEmbedPrefix()] });
-    }
-
-    if (cmd === "setup") {
-      if (!isGuildAdmin(msg.member)) return msg.reply({ embeds: [errorEmbed("Manage Server permission required")] });
-      try {
-        const { voiceRoom, channel } = await runBocchiSetup(msg.guild);
-        return msg.reply({ content: `Done! Joined <#${voiceRoom.id}> (saved as the music room) and posted controls in <#${channel.id}>.` });
-      } catch (e) { return msg.reply({ embeds: [errorEmbed("Could not set up the bocchi room: " + (e?.message || e))] }); }
-    }
-
-    // Prepare option values similar to slash
-    let q = null, limit = null, index = null, mode = null, value = null;
-
-    if (cmd === "play") {
-      q = parts.join(" ").trim();
-      if (!q) return msg.reply({ embeds: [errorEmbed(`Please give a song name or link\n**Example:** \`${BOT_PREFIX}play lofi hip hop\` or \`${BOT_PREFIX}play https://open.spotify.com/track/...\``)] });
-    } else if (cmd === "video") {
-      q = parts.join(" ").trim();
-      if (!q) return msg.reply({ embeds: [errorEmbed(`Please give a YouTube video name or link\n**Example:** \`${BOT_PREFIX}video lofi hip hop\``)] });
-    } else if (cmd === "playlist") {
-      const parsed = parseLimitFromArgs(parts);
-      limit = parsed.limit;
-      q = parsed.tokens.join(" ").trim();
-      if (!q) return msg.reply({ embeds: [errorEmbed(`Please give a playlist link or search text\n**Example:** \`${BOT_PREFIX}playlist lofi playlist --limit 20\``)] });
-    } else if (cmd === "remove") {
-      index = parseInt(parts[0], 10);
-      if (Number.isNaN(index) || index < 1) return msg.reply({ embeds: [errorEmbed(`Please give the queue number to remove\n**Example:** \`${BOT_PREFIX}remove 3\``)] });
-    } else if (cmd === "loop") {
-      mode = (parts[0] || "").toLowerCase();
-      if (!mode) return msg.reply({ embeds: [errorEmbed(`Please specify a mode: \`off\` · \`track\` · \`queue\`\n**Example:** \`${BOT_PREFIX}loop track\``)] });
-    } else if (cmd === "volume") {
-      value = parseInt(parts[0], 10);
-      if (Number.isNaN(value)) return msg.reply({ embeds: [errorEmbed(`Please give a volume number (0-10000)\n**Example:** \`${BOT_PREFIX}volume 80\``)] });
-    }
-
-    // Voice channel check (same as slash)
-    const me = msg.guild.members.me;
-    const userVC = msg.member?.voice?.channelId;
-    const botVC = me?.voice?.channelId;
-    const sameVC = userVC && (!botVC || botVC === userVC);
-    const needsSameVC = !["help", "ping", "botupdate", "np", "queue", "panel", "setup", "ytstatus", "ytsignin", "ytsignout", "watchtogether", "vstate"].includes(cmd);
-    if (needsSameVC && !sameVC) {
-      return msg.reply({ embeds: [errorEmbed("Please join the bot's voice channel first 🎙️")] });
-    }
-
-    // Acknowledge receipt
-    if (cmd === "play") await replyAck(msg, "");
-    else if (cmd === "playlist") await replyAck(msg, "");
-    else if (cmd === "volume") await replyAck(msg, "");
-    else if (cmd === "skip") await replyAck(msg, "");
-    else if (cmd === "stop") await replyAck(msg, "");
-    else if (cmd === "pause") await replyAck(msg, "");
-    else if (cmd === "resume") await replyAck(msg, "");
-    else if (cmd === "ping") await replyAck(msg, "");
-    else if (cmd === "botupdate") await replyAck(msg, "");
-
-    // Execute using the same internal functions as slash
-    const state = getGuildState(msg.guild);
-
-    if (cmd === "ping") {
-      return msg.reply({
-        embeds: [
-          makeEmbed(COLORS.info)
-            .setDescription("### 🏓  Pong!")
-            .addFields(
-              { name: "🌐 WebSocket", value: `\`${Math.round(msg.client.ws.ping)} ms\``, inline: true },
-            )
-        ]
-      });
-    }
-
-    if (cmd === "botupdate") {
-      const m = await msg.reply({ embeds: [infoEmbed("🔄 Updating yt-dlp…", "One moment please")] });
-      await runYtDlpUpdate((t) => m.edit({
-        embeds: [
-          t.startsWith("✅")
-            ? successEmbed("✅ Update complete", "yt-dlp is now up to date")
-            : errorEmbed(t)
-        ], content: ""
-      }));
-      return;
-    }
-
-    if (cmd === "panel") {
-      const panel = state.current ? buildNowPlayingEmbed(state, state.currentLyrics) : buildPanelEmbed(msg.guild);
-      const ref = await upsertNpMessage(msg.guild, null, panel, true);
-      if (!ref) return msg.reply({ embeds: [errorEmbed("I cannot access the #bocchi control channel.")] });
-      if (state.current) startNowPlayingTicker(msg.guild, state);
-      return msg.reply({ content: `Music controls are in <#${ref.channelId}>.` });
-    }
-
-    if (cmd === "ytstatus") {
-      const ck = ytCookiesStatus();
-      return msg.reply({
-        embeds: [
-          makeEmbed(COLORS.info).setDescription(`### 🍪 YouTube sign-in\n${ck.exists ? `✅ signed in\n\`${ck.path}\` (${ck.size} bytes)` : `❌ not signed\nAdmin attach the file \`cookies.txt\` with \`${BOT_PREFIX}ytsignin\``}`)
-        ]
-      });
-    }
-
-    if (cmd === "ytsignin") {
-      if (!isGuildAdmin(msg.member)) return msg.reply({ embeds: [errorEmbed("Manage Server permission required")] });
-      const att = msg.attachments?.first?.();
-      if (!att) return msg.reply({ embeds: [errorEmbed(`Attach the cookies.txt file\n**Example:** attach it + \`${BOT_PREFIX}ytsignin\``)] });
-      try {
-        const r = await fetch(att.url);
-        const text = await r.text();
-        const saved = saveYTCookies(text);
-        return msg.reply({ embeds: [successEmbed("✅ YouTube signed in", `saved → \`${saved}\`\nTry \`${BOT_PREFIX}play ...\` `)] });
-      } catch (e) { return msg.reply({ embeds: [errorEmbed("Could not save cookies: " + (e?.message || e))] }); }
-    }
-
-    if (cmd === "ytsignout") {
-      if (!isGuildAdmin(msg.member)) return msg.reply({ embeds: [errorEmbed("Manage Server permission required")] });
-      try { fs.unlinkSync(ytCookiesPath()); } catch { }
-      if (!process.env.YTDLP_COOKIES_PATH) config.cookieFile = null;
-      return msg.reply({ embeds: [successEmbed("🗑️ Signed out", "Cookies removed")] });
-    }
-
-    if (cmd === "vstate") {
-      const d = voiceDiag(msg.guild);
-      return msg.reply({
-        embeds: [
-          makeEmbed(COLORS.info).setDescription(`### 🔍 Voice state`)
-            .addFields(
-              { name: "Bot VC", value: `${d.botVC}`, inline: true },
-              { name: "Connection", value: `${d.conn}`, inline: true },
-              { name: "Subscribed", value: `${d.subscribed}`, inline: true },
-              { name: "Player", value: `${d.player}`, inline: true },
-              { name: "Current", value: `${d.current}`, inline: false },
-              { name: "Queue", value: `${d.queue}`, inline: true },
-            )
-        ]
-      });
-    }
-
-    if (cmd === "video") {
-      const info = await resolveVideoInfo(q);
-      if (!info) return msg.reply({ embeds: [errorEmbed("Video not found — try another search")] });
-      const watchUrl = info.videoId ? `http://localhost:${config.port}/watch?v=${info.videoId}` : info.url;
-      const vThumb = info.thumb || (info.videoId ? `https://i.ytimg.com/vi/${info.videoId}/hqdefault.jpg` : thumbFor(info.url));
-      // Queue audio in VC too so voice hears it while watching the page
-      state.queue.push({ title: info.title, source: info.url, thumb: vThumb, durationSec: info.durationSec || null, requestedBy: msg.author.tag, guild: msg.guild, voiceChannelId: userVC, textChannelId: msg.channelId });
-      const vEmbed = makeEmbed(COLORS.music).setDescription(`### 🎬 ${info.title}`)
-        .addFields({ name: "🔗 Video page", value: info.url, inline: false }, { name: "🔊 Audio", value: "queued in voice — hear it while you watch the page", inline: false });
-      if (vThumb) vEmbed.setThumbnail(vThumb);
-      await msg.reply({ embeds: [vEmbed], components: buildVideoRows(info.videoId, watchUrl) });
-      if (!state.current) playNext(msg.guild, msg.channelId, state);
-      return;
-    }
-
-    if (cmd === "watchtogether") {
-      if (!userVC) return msg.reply({ embeds: [errorEmbed("Join a voice channel first, then use this command 🎙️")] });
-      try {
-        const vc = msg.guild.channels.cache.get(userVC);
-        const inv = await createWatchTogetherInvite(vc);
-        return msg.reply({
-          embeds: [
-            successEmbed("📺 Watch Together ready", `Click the link to watch together in **${vc?.name || "voice"}**\n${inv.url}\n\n*Video shows inside everyone's voice chat (bots can only send audio + activity links — Discord gives bots no video stream)*`)
-          ]
-        });
-      } catch (e) { return msg.reply({ embeds: [errorEmbed("Could not create a watch party (bot needs the Create Invite permission): " + (e?.message || e))] }); }
-    }
-
-    if (cmd === "play") {
-      const item = {
-        title: q,
-        source: q,
-        requestedBy: msg.author.tag,
-        guild: msg.guild,
-        voiceChannelId: userVC,
-        textChannelId: msg.channelId,
-      };
-      state.queue.push(item);
-      const shouldStart = !state.current;
-      const metaP = resolveTitleAndThumb(q);
-      if (shouldStart) playNext(msg.guild, msg.channelId, state);
-      const meta = await metaP;
-      if (meta.title && meta.title !== q) item.title = meta.title;
-      if (meta.thumb) item.thumb = meta.thumb;
-      if (meta.durationSec) item.durationSec = meta.durationSec;
-      const addedEmbed = makeEmbed(COLORS.success)
-        .setDescription(`### ➕ Added to queue`)
-        .addFields(
-          { name: "🎵 Track", value: `**${cleanTitle(item.title)}**`, inline: false },
-          { name: "📋 Queue position", value: `\`#${state.queue.length}\``, inline: true },
-          { name: "👤 Requested by", value: `${msg.author}`, inline: true },
-        );
-      if (item.thumb) addedEmbed.setThumbnail(item.thumb);
-      await msg.reply({ embeds: [addedEmbed] });
-      return;
-    }
-
-    if (cmd === "playlist") {
-      const items = await fetchPlaylistEntries(q, limit);
-      if (!items.length) return msg.reply({ embeds: [errorEmbed("No songs found in the playlist or search results")] });
-      for (const { title, url, thumb, durationSec } of items) {
-        state.queue.push({
-          title,
-          source: url,
-          thumb: thumb || thumbFor(url),
-          durationSec: durationSec || null,
-          requestedBy: msg.author.tag,
-          guild: msg.guild,
-          voiceChannelId: userVC,
-          textChannelId: msg.channelId,
-        });
-      }
-      const preview = items.slice(0, 5).map((x, i) => `\`${i + 1}.\` ${x.title}`).join("\n");
-      const more = items.length > 5 ? `\n*… and ${items.length - 5} tracks*` : "";
-      await msg.reply({
-        embeds: [
-          makeEmbed(COLORS.queue)
-            .setDescription(`### 📚 Playlist loaded`)
-            .addFields(
-              { name: "🎶 Total tracks", value: `**${items.length} tracks**`, inline: true },
-              { name: "👤 Requested by", value: `${msg.author}`, inline: true },
-              { name: "📋 First tracks", value: `${preview}${more}`, inline: false },
-            )
-        ]
-      });
-      if (!state.current) playNext(msg.guild, msg.channelId, state);
-      return;
-    }
-
-    if (cmd === "skip") {
-      state.skipRequested = true;
-      state.player.stop(true);
-      cleanupCurrentPipeline(state);
-      return msg.reply({ embeds: [successEmbed("⏭️ Skipped", state.queue.length ? `Next: **${state.queue[0]?.title || "—"}**` : "Queue is empty")] });
-    }
-
-    if (cmd === "stop") {
-      state.queue = [];
-      state.current = null;
-      state.startedAt = null;
-      state.loopMode = "off";
-      state.skipRequested = false;
-      if (state.leaveTimer) { clearTimeout(state.leaveTimer); state.leaveTimer = null; }
-      state.player.stop(true);
-      cleanupCurrentPipeline(state);
-      const vc = getVoiceConnection(msg.guild.id);
-      if (vc) vc.destroy();
-      markNpStopped(msg.guild).catch(() => { });
-      return msg.reply({ embeds: [successEmbed("🛑 Stopped", "Queue cleared and left voice")] });
-    }
-
-    if (cmd === "pause") { state.player.pause(); return msg.reply({ embeds: [infoEmbed("⏸️ Paused", "Type `n!resume` to resume")] }); }
-    if (cmd === "resume") { state.player.unpause(); return msg.reply({ embeds: [successEmbed("▶️ Resumed", `Now playing: **${state.current?.title || "—"}**`)] }); }
-
-    if (cmd === "np") {
-      if (!state.current) return msg.reply({ embeds: [infoEmbed("🎵 Nothing playing", "Use `n!play <song>` to start")] });
-      const lyrNp = await fetchLyrics(state.current.title).catch(() => null);
-      return msg.reply({ embeds: [buildNowPlayingEmbed(state, lyrNp)], components: buildControlRows(state) });
-    }
-
-    if (cmd === "queue") {
-      if (!state.queue.length) return msg.reply({ embeds: [infoEmbed("📭 Queue is empty", "Use `n!play <song>` to add songs")] });
-      const lines = state.queue.slice(0, 10).map((x, i) => `\`${String(i + 1).padStart(2, "0")}.\` **${x.title}**\n　　👤 ${x.requestedBy}`).join("\n");
-      const more = state.queue.length > 10 ? `\n*… and **${state.queue.length - 10}** tracks*` : "";
-      return msg.reply({
-        embeds: [
-          makeEmbed(COLORS.queue)
-            .setDescription(`### 📋 Queue`)
-            .addFields(
-              { name: `Tracks (${Math.min(state.queue.length, 10)}/${state.queue.length})`, value: lines + more, inline: false },
-              { name: "🔁 Loop", value: loopLabel(state.loopMode), inline: true },
-              { name: "🎵 Now playing", value: state.current ? `**${state.current.title}**` : "—", inline: true },
-            )
-        ]
-      });
-    }
-
-    if (cmd === "volume") {
-      setVolumePct(state, value);
-      const bar = "█".repeat(Math.round(Math.min(state.volumePct, 200) / 20)) + "░".repeat(10 - Math.round(Math.min(state.volumePct, 200) / 20));
-      return msg.reply({
-        embeds: [
-          successEmbed("🔊  Volume updated", `\`${bar}\` **${state.volumePct}%**`)
-        ]
-      });
-    }
-
-    if (cmd === "shuffle") {
-      shuffleArray(state.queue);
-      return msg.reply({ embeds: [successEmbed("🔀 Shuffled", `Reordered **${state.queue.length} tracks** done`)] });
-    }
-
-    if (cmd === "remove") {
-      if (index > state.queue.length) return msg.reply({ embeds: [errorEmbed(`Number is past the queue end (${state.queue.length} tracks)`)] });
-      const [rm] = state.queue.splice(index - 1, 1);
-      return msg.reply({ embeds: [successEmbed("🗑️  Removed from queue", `**${rm?.title || "Unknown"}**`)] });
-    }
-
-    if (cmd === "loop") {
-      if (!["off", "track", "queue"].includes(mode)) return msg.reply({ embeds: [errorEmbed("Mode must be `off` · `track` · `queue`")] });
-      state.loopMode = mode;
-      return msg.reply({ embeds: [successEmbed("🔁 Loop updated", `Current mode: **${loopLabel(mode)}**`)] });
     }
 
   } catch (e) {
@@ -4643,3 +4238,6 @@ function startDashboard() {
   server.listen(config.port, () => logPretty("SYSTEM", `Dashboard on port ${config.port} (/health, /login, /dashboard)`));
 }
 startDashboard();
+
+
+
