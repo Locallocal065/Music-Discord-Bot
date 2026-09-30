@@ -1,0 +1,12 @@
+[variables]
+NIXPACKS_NODE_VERSION = "22.19.0"
+TZ = "Asia/Bangkok"
+
+[phases.setup]
+aptPkgs = ["ffmpeg", "python3", "ca-certificates", "tzdata"]
+
+[phases.install]
+cmds = [
+  "ln -sf /usr/bin/python3 /usr/bin/python || true",
+  "npm install --omit=dev"
+]
