@@ -1,3 +1,6 @@
+const { logConfiguration, readLastUpdateTs, writeLastUpdateTs, runYtDlpUpdate, msUntilNextBangkokMidnight, scheduleDailyBangkokMidnight, ytCookiesPath, ytCookiesStatus, saveYTCookies, isGuildAdmin, wsPing } = require("./function/system.js");
+const { volumeStorePath, loadGuildSettings, effectiveCookieFile, saveGuildSettings, getSavedVolume, setSavedVolume, getSavedSpeed, setSavedSpeed, getSavedShowLyrics, setSavedShowLyrics, getSavedShowControls, setSavedShowControls, getSavedMusicVoice, setSavedMusicVoice, getSavedAiChannel, aiSessionKeyForChannel, setSavedAiChannel, getSavedControlChannel, setSavedControlChannel } = require("./function/settings.js");
+const { parseSyncedLyrics, lyricIndexAt, fetchLyrics, karaokeField, estimateSyncedLyrics } = require("./function/lyrics.js");
 const { aiSystemInstruction, askOpenRouter, askGemini, loadAiHistories, loadAiPersonas, saveAiPersonas, getAiPersona, setAiPersona, saveAiHistories, askGeminiWithHistory, clearGuildAiChats } = require("./function/ai.js");
 const { swallowPipeError, checkFfmpegAvailability, getDirectAudioUrlAndHeaders, buildFfmpegHeadersString, spawnFfmpegFromDirectUrl, spawnUniversalPipe, clampSpeed, combineAudioFilters, spawnFfmpegStdin, cushionStream, awaitPrebuffer, spawnTikTokPipe, cleanupCurrentPipeline } = require("./function/stream.js");
 const { isSpotifyUrl, normalizeSpotifyUrl, spotifyKind, fetchJsonWithTimeout, spotifyTitle, spotifyTrackToSearchQuery, spotifyMeta, tiktokMeta, tiktokMetaOnce, tiktokHeaders, isTikTokUrl, getTitle, thumbFor, extractYouTubeIdSafe, pickThumb, resolveTitleAndThumb, resolveFirstVideoUrl, extractYouTubeId, resolveVideoInfo } = require("./function/metadata.js");
@@ -134,81 +137,7 @@ const config = {
 // values such as the bot token are not printed directly; instead we indicate
 // whether they are set. This runs immediately so users can verify their
 // `.env` settings when starting the bot.
-function logConfiguration() {
-  const entries = [
-    { key: "port", env: "PORT" },
-    { key: "token", env: "TOKEN", mask: true },
-    { key: "geminiApiKey", env: "GEMINI_API_KEY", mask: true },
-    { key: "openRouterApiKey", env: "OPENROUTER_API_KEY", mask: true },
-    { key: "openRouterModel", env: "OPENROUTER_MODEL" },
-    { key: "ffmpegPath", env: "FFMPEG_PATH" },
-    { key: "cookieFile", env: "YTDLP_COOKIES_PATH" },
-    { key: "logDir", env: "LOG_DIR" },
-    { key: "dataDir", env: "DATA_DIR" },
-    { key: "debugFfmpeg", env: "DEBUG_FFMPEG" },
-    { key: "defaultVolume", env: "DEFAULT_VOLUME" },
-    { key: "defaultLoop", env: "DEFAULT_LOOP_MODE" },
-    { key: "timezoneOffsetHours", env: "TIMEZONE_OFFSET_HOURS" },
-    { key: "ytdlpForceIpv4", env: "YTDLP_FORCE_IPV4" },
-    { key: "ytdlpAutoUpdate", env: "YTDLP_AUTO_UPDATE" },
-    { key: "audioChannels", env: "AUDIO_CHANNELS" },
-    { key: "audioSampleRate", env: "AUDIO_SAMPLE_RATE" },
-    { key: "opusBitrate", env: "OPUS_BITRATE" },
-    { key: "opusVbr", env: "OPUS_VBR" },
-    { key: "opusApplication", env: "OPUS_APPLICATION" },
-    { key: "opusFrameDuration", env: "OPUS_FRAME_DURATION" },
-    { key: "opusComplexity", env: "OPUS_COMPLEXITY" },
-    { key: "audioFilter", env: "AUDIO_FILTER" },
-    { key: "ffmpegLowLatency", env: "FFMPEG_LOW_LATENCY" },
-    { key: "ffmpegInputAnalyzeMs", env: "FFMPEG_INPUT_ANALYZE_MS" },
-    { key: "ffmpegReconnectDelayMax", env: "FFMPEG_RECONNECT_DELAY_MAX" },
-    { key: "ffmpegExtraArgs", env: "FFMPEG_EXTRA_ARGS" },
-    { key: "dashboardUser", env: "DASHBOARD_USER" },
-    { key: "dashboardPassword", env: "DASHBOARD_PASSWORD", mask: true },
-    { key: "disconnectDelaySec", env: "DISCONNECT_DELAY_SEC" },
-    { key: "ytdlpPlayerClient", env: "YTDLP_PLAYER_CLIENT" },
-    { key: "prebufferKB", env: "PREBUFFER_KB" },
-    { key: "prebufferWaitMs", env: "PREBUFFER_WAIT_MS" },
-  ];
-  // We want to simulate loading the .env file by printing a message
-  // and waiting a short time before outputting the configuration.  Using
-  // an Atomics.wait call lets us block synchronously without complicating
-  // the asynchronous flow elsewhere in the program.  This approach
-  // guarantees that the loading message appears before the variables
-  // themselves, and avoids interleaving logs due to unresolved promises.
-  console.log("--------------------------------");
-  // Thai text explains the wait – it will show up in the console to
-  // indicate a brief pause while reading the .env file.
-  console.log(
-    "[BOT] loading .env"
-  );
-  console.log("--------------------------------");
-  // Block for 1000ms to simulate reading the .env file
-  try {
-    const sab = new SharedArrayBuffer(4);
-    const ia = new Int32Array(sab);
-    // Atomics.wait returns 'timed-out' when the timeout expires
-    Atomics.wait(ia, 0, 0, 1000);
-  } catch {
-    // Fall back to a non-blocking setTimeout if Atomics.wait is unavailable
-    const end = Date.now() + 1000;
-    while (Date.now() < end) {
-      // busy loop
-    }
-  }
-  for (const entry of entries) {
-    const used = config[entry.key];
-    let displayValue;
-    if (entry.mask) {
-      displayValue = used ? "[set]" : "[not set]";
-    } else {
-      displayValue = used;
-    }
-    // Print in the form "<ENV_NAME>:<value>" with a single leading space
-    console.log(` ${entry.env}:${displayValue}`);
-    console.log("--------------------------------");
-  }
-}
+
 // Invoke the configuration logger early so users see settings on startup
 logConfiguration();
 console.log("[BOT] Starting now");
@@ -344,9 +273,7 @@ const R = C.reset;
 
 // ─── WS ping helper ──────────────────────────────────────────────────────────
 let _clientForPing = null;
-function wsPing() {
-  try { return Math.round(_clientForPing?.ws?.ping || 0); } catch { return 0; }
-}
+
 
 // ─── File logger (plain text, no ANSI) ───────────────────────────────────────
 
@@ -430,42 +357,11 @@ const UPDATE_MARK_FILE = path.join(DATA_DIR, "yt-dlp.last");
 // Calculate timezone offset in milliseconds based on configuration (hours → ms)
 const BKK_OFFSET_MS = config.timezoneOffsetHours * 60 * 60 * 1000;
 let isUpdatingYtDlp = false;
-function readLastUpdateTs() { try { return Number(fs.readFileSync(UPDATE_MARK_FILE, "utf8")); } catch { return 0; } }
-function writeLastUpdateTs(ts = Date.now()) { try { fs.writeFileSync(UPDATE_MARK_FILE, String(ts), "utf8"); } catch { } }
-async function runYtDlpUpdate(replyFn) {
-  if (isUpdatingYtDlp) { replyFn?.("⏳ Update already in progress"); return; }
-  isUpdatingYtDlp = true;
-  const started = Date.now();
-  try {
-    try { await ytdlp("--version"); } catch { }
-    const out = await ytdlp("-U").catch(err => ({ error: err }));
-    if (out?.error) {
-      logPretty("ERROR", `yt-dlp update failed: ${out.error.message || out.error}`);
-      replyFn?.("❌ Update failed");
-    } else {
-      const stdout = typeof out === "string" ? out : (out?.stdout || "");
-      logPretty("SYSTEM", `yt-dlp updated  ${stdout.toString().trim().split("\n").pop()}`);
-      writeLastUpdateTs(started);
-      replyFn?.("✅ Update finished");
-    }
-  } finally { isUpdatingYtDlp = false; }
-}
-function msUntilNextBangkokMidnight() {
-  const now = new Date();
-  const bkkNow = new Date(now.getTime() + BKK_OFFSET_MS);
-  const nextMidnightBkkUTCms = Date.UTC(bkkNow.getUTCFullYear(), bkkNow.getUTCMonth(), bkkNow.getUTCDate() + 1, 0, 0, 0) - BKK_OFFSET_MS;
-  return Math.max(1, nextMidnightBkkUTCms - now.getTime());
-}
-function scheduleDailyBangkokMidnight(fn) {
-  const delay = msUntilNextBangkokMidnight();
-  setTimeout(async () => {
-    try {
-      await fn();
-    } finally {
-      scheduleDailyBangkokMidnight(fn);
-    }
-  }, delay);
-}
+
+
+
+
+
 
 // Discord client
 const client = new Client({
@@ -483,39 +379,10 @@ _clientForPing = client;
 // NOTE: avoid process.env.PREFIX because Termux sets PREFIX=/data/... by default.
 
 // ================= Discord UI (buttons + YouTube sign-in) =================
-function ytCookiesPath() {
-  return config.cookieFile || path.join(config.dataDir, "cookies.txt");
-}
-function ytCookiesStatus() {
-  const p = ytCookiesPath();
-  try {
-    const st = fs.statSync(p);
-    return { path: p, exists: true, size: st.size, mtime: st.mtime.toISOString() };
-  } catch { return { path: p, exists: false, size: 0, mtime: null }; }
-}
-function saveYTCookies(text) {
-  const t = String(text || "").trim();
-  if (!t || t.length < 100) throw new Error("cookies too short — paste full cookies.txt");
-  if (!t.includes("youtube.com") && !t.includes("youtu.be")) throw new Error("no youtube.com entries found");
-  // Must look like a Netscape cookies file, or yt-dlp rejects EVERYTHING.
-  const lines = t.split("\n").filter((l) => l && !l.trim().startsWith("#"));
-  if (!lines.length || !lines.some((l) => l.includes("\t"))) {
-    throw new Error("not a Netscape cookies.txt (need tab-separated lines — export with 'Get cookies.txt LOCALLY', don't paste JSON)");
-  }
-  const target = ytCookiesPath();
-  fs.mkdirSync(path.dirname(target), { recursive: true });
-  fs.writeFileSync(target, t.replace(/\r\n/g, "\n"), "utf8");
-  config.cookieFile = target; // live, no restart
-  logPretty("SYSTEM", `YouTube cookies updated via Discord (${t.length} chars -> ${target})`);
-  return target;
-}
-function isGuildAdmin(member) {
-  try {
-    if (!member) return false;
-    if (member.id === member.guild?.ownerId) return true;
-    return member.permissions?.has?.(PermissionFlagsBits.ManageGuild);
-  } catch { return false; }
-}
+
+
+
+
 
 // Setup is done once the guild has both bocchi rooms (text + saved voice).
 function isBocchiSetup(state) {
@@ -734,88 +601,16 @@ function progressLine(state) {
 // Lyrics via LRCLIB (free, no key). Cached per title. Returns plain text plus
 // timestamped `synced` lines for karaoke scrolling, or null when missing.
 const lyricCache = new Map();
-function parseSyncedLyrics(synced) {
-  const out = [];
-  for (const rawLine of String(synced || "").split(/\r?\n/)) {
-    const m = rawLine.match(/^\s*\[(\d+):(\d+(?:\.\d+)?)\]\s*(.*)$/);
-    if (!m) continue;
-    const t = Number(m[1]) * 60 + Number(m[2]);
-    const text = (m[3] || "").trim().slice(0, 160);
-    if (!Number.isFinite(t) || t < 0 || !text) continue;
-    out.push({ t, text });
-    if (out.length >= 400) break;
-  }
-  out.sort((a, b) => a.t - b.t);
-  return out;
-}
-function lyricIndexAt(synced, elapsedSec) {
-  let idx = -1;
-  for (let i = 0; i < synced.length; i++) {
-    if (synced[i].t <= elapsedSec + 0.25) idx = i;
-    else break;
-  }
-  return idx;
-}
-async function fetchLyrics(title) {
-  const key = String(title || "").slice(0, 80).toLowerCase().trim();
-  if (!key || key.length < 3) return null;
-  if (lyricCache.has(key)) return lyricCache.get(key);
-  const p = (async () => {
-    try {
-      const q = encodeURIComponent(cleanTitle(title, 80));
-      const s = await fetchJsonWithTimeout(`https://lrclib.net/api/search?q=${q}`, 7000);
-      const arr = Array.isArray(s) ? s : [];
-      const best = arr.find((x) => x && x.syncedLyrics) || arr.find((x) => x && x.plainLyrics) || null;
-      if (!best) return null;
-      const synced = parseSyncedLyrics(best.syncedLyrics);
-      let text = String(best.plainLyrics || "").trim();
-      if (!text && best.syncedLyrics) text = String(best.syncedLyrics).replace(/^\[\d+:\d+\.\d+\]\s*/gm, "").trim();
-      if (!text) return null;
-      if (/^\[?instrumental\]?$/i.test(text)) return { text: "🎵 Instrumental", synced: [], artist: best.artistName || null, name: best.trackName || null };
-      if (text.length < 20) return null;
-      if (text.length > 900) text = text.slice(0, 900).trim() + "…";
-      return { text, synced, artist: best.artistName || null, name: best.trackName || null };
-    } catch { return null; }
-  })();
-  lyricCache.set(key, p);
-  if (lyricCache.size > 200) { try { lyricCache.delete(lyricCache.keys().next().value); } catch {} }
-  return p;
-}
+
+
+
 // Spotify-style karaoke block: a scrolling window of lines around the current
 // position — sung lines dimmed, the live line highlighted, upcoming lines plain.
 // Driven by track position so the window auto-scrolls as the song plays.
-function karaokeField(state, lyrics, estimated = false) {
-  const el = playbackSeconds(state);
-  const synced = lyrics.synced;
-  const idx = lyricIndexAt(synced, el);
-  const PAST = 2, FUTURE = 4;
-  const rows = [];
-  if (idx < 0) {
-    rows.push("*♪ Intro — get ready…*");
-    for (let i = 0; i < Math.min(FUTURE + 1, synced.length); i++) rows.push(`　${synced[i].text}`);
-  } else {
-    const start = Math.max(0, idx - PAST);
-    for (let i = start; i < idx; i++) rows.push(`╰╴${synced[i].text}`);
-    rows.push(`**🎤▶ ${synced[idx].text}**`);
-    for (let i = idx + 1; i < synced.length && rows.length < PAST + 1 + FUTURE; i++) rows.push(`　${synced[i].text}`);
-    if (idx >= synced.length - 1) rows.push("*♪ Outro…*");
-  }
-  let value = rows.join("\n");
-  if (value.length > 1000) value = value.slice(0, 997).trimEnd() + "…";
-  const by = lyrics.artist ? ` · ${lyrics.artist}` : "";
-  const est = estimated ? " · ~timing estimated" : "";
-  return { name: `🎤 Karaoke — sing along${by}${est}`, value: `​\n${value}\n​`, inline: false };
-}
+
 // No synced LRC available? Spread the plain lines evenly over the track so the
 // karaoke highlight still scrolls (clearly labelled as estimated).
-function estimateSyncedLyrics(text, durationSec) {
-  const lines = String(text).split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
-  if (lines.length < 2 || lines.length > 200) return [];
-  const start = Math.max(5, durationSec * 0.06);
-  const end = durationSec * 0.97;
-  const step = (end - start) / lines.length;
-  return lines.map((line, i) => ({ t: start + i * step, text: line.slice(0, 160) }));
-}
+
 
 function stopNowPlayingTicker(state) {
   if (state.npRefreshTimer) clearInterval(state.npRefreshTimer);
@@ -1280,105 +1075,29 @@ const commands = [
 const guildStates = new Map();
 
 // Persisted per-guild settings (volume) — survives restarts via data dir.
-function volumeStorePath() { return path.join(config.dataDir, "guild-settings.json"); }
-function loadGuildSettings() {
-  try {
-    const raw = fs.readFileSync(volumeStorePath(), "utf8");
-    const o = JSON.parse(raw);
-    return (o && typeof o === "object") ? o : {};
-  } catch { return {}; }
-}
+
+
 // Only pass a cookies file to yt-dlp if it actually looks like a Netscape
 // cookies file (non-empty, tab-separated, ideally with the standard header).
 // An empty/garbage file makes yt-dlp fail EVERYTHING — worse than no cookies.
 let _cookieCache = { path: null, mtimeMs: 0, valid: false };
-function effectiveCookieFile() {
-  const p = config.cookieFile;
-  if (!p) return null;
-  try {
-    const st = fs.statSync(p);
-    if (!st.isFile() || st.size < 50) { _cookieCache = { path: p, mtimeMs: st.size, valid: false }; return null; }
-    const key = p + ":" + st.size + ":" + st.mtimeMs;
-    if (_cookieCache.path === key) return _cookieCache.valid ? p : null;
-    const head = fs.readFileSync(p, "utf8").slice(0, 4096);
-    const lines = head.split("\n").filter((l) => l && !l.trim().startsWith("#"));
-    const valid = lines.length > 0 && lines.some((l) => l.includes("\t") && /youtube\.com|youtu\.be|google\.com/i.test(l));
-    _cookieCache = { path: key, valid };
-    if (!valid) logPretty("WARN", `Ignoring invalid cookies file ${p} (not Netscape format) — running without cookies`);
-    return valid ? p : null;
-  } catch { return null; }
-}
-function saveGuildSettings(all) {
-  try {
-    fs.mkdirSync(config.dataDir, { recursive: true });
-    fs.writeFileSync(volumeStorePath(), JSON.stringify(all), "utf8");
-  } catch (e) { logPretty("ERROR", "save settings: " + (e?.message || e)); }
-}
-function getSavedVolume(guildId) {
-  const v = loadGuildSettings()[String(guildId)]?.volumePct;
-  return Number.isFinite(v) ? Math.max(0, Math.min(10000, v)) : null;
-}
-function setSavedVolume(guildId, pct) {
-  const all = loadGuildSettings();
-  all[String(guildId)] = { ...(all[String(guildId)] || {}), volumePct: pct };
-  saveGuildSettings(all);
-}
-function getSavedSpeed(guildId) {
-  const v = loadGuildSettings()[String(guildId)]?.speed;
-  return Number.isFinite(v) && v >= 0.5 && v <= 2 ? v : 1;
-}
-function getSavedShowLyrics(guildId) {
-  const v = loadGuildSettings()[String(guildId)]?.showLyrics;
-  return v === undefined ? true : v !== false;
-}
-function setSavedShowLyrics(guildId, on) {
-  const all = loadGuildSettings();
-  all[String(guildId)] = { ...(all[String(guildId)] || {}), showLyrics: on !== false };
-  saveGuildSettings(all);
-}
-function getSavedShowControls(guildId) {
-  const v = loadGuildSettings()[String(guildId)]?.showControls;
-  return v === undefined ? true : v !== false;
-}
-function setSavedShowControls(guildId, on) {
-  const all = loadGuildSettings();
-  all[String(guildId)] = { ...(all[String(guildId)] || {}), showControls: on !== false };
-  saveGuildSettings(all);
-}
-function getSavedMusicVoice(guildId) {
-  return loadGuildSettings()[String(guildId)]?.musicVoiceChannelId || null;
-}
-function setSavedMusicVoice(guildId, channelId) {
-  const all = loadGuildSettings();
-  all[String(guildId)] = { ...(all[String(guildId)] || {}), musicVoiceChannelId: channelId };
-  saveGuildSettings(all);
-}
-function setSavedSpeed(guildId, speed) {
-  const all = loadGuildSettings();
-  all[String(guildId)] = { ...(all[String(guildId)] || {}), speed };
-  saveGuildSettings(all);
-}
-function getSavedAiChannel(guildId) {
-  return loadGuildSettings()[String(guildId)]?.aiChatChannelId || null;
-}
-function aiSessionKeyForChannel(guildId, channelId) {
-  return getSavedAiChannel(guildId) === channelId
-    ? `channel:${guildId}:${channelId}`
-    : `slash:${guildId}:${channelId}`;
-}
-function setSavedAiChannel(guildId, channelId) {
-  const all = loadGuildSettings();
-  all[String(guildId)] = { ...(all[String(guildId)] || {}), aiChatChannelId: channelId };
-  saveGuildSettings(all);
-}
-function getSavedControlChannel(guildId) {
-  return loadGuildSettings()[String(guildId)]?.controlChannelId || null;
-}
-function setSavedControlChannel(guildId, channelId) {
-  const all = loadGuildSettings();
-  all[String(guildId)] = { ...(all[String(guildId)] || {}), controlChannelId: channelId };
-  saveGuildSettings(all);
-}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 async function deletePublicAiChat(guild) {
   const channelId = getSavedAiChannel(guild.id);
   if (!channelId) throw new Error("No public AI chat is configured. Run /setai first.");
