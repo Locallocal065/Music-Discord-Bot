@@ -255,7 +255,11 @@ async function tiktokMetaOnce(pageUrl) {
   const title = d.title || (d.music_info && d.music_info.title) || pageUrl;
   const thumb = d.cover || d.origin_cover || d.ai_dynamic_cover || null;
   const author = (d.author && (d.author.nickname || d.author.unique_id)) || null;
-  return { title: String(title), thumb, audioUrl: String(music), duration: d.duration || null, author };
+  const videoId = d.id ? String(d.id) : null;
+  // TikWM proxy URL works from any IP (incl. cloud/Railway);
+  // TikTok CDN URL (music) is blocked on datacenter IPs.
+  const proxyAudioUrl = videoId ? `https://www.tikwm.com/video/music/${videoId}.mp3` : null;
+  return { title: String(title), thumb, audioUrl: String(music), proxyAudioUrl, videoId, duration: d.duration || null, author };
 }
 function tiktokHeaders() {
   return "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36\r\n"
@@ -2833,23 +2837,24 @@ async function startPlayback(guild, item, state, stayPut = false) {
     source = `ytsearch1:${source}`;
   }
 
-  // TikTok: metadata (title/thumb) via TikWM, audio streamed by passing the
-  // CDN URL + spoofed headers directly to ffmpeg (avoids Railway/cloud datacenter
-  // 403s that occur when Node fetch() hits TikTok CDN). Falls back to yt-dlp.
+  // TikTok: metadata via TikWM. Audio is streamed via TikWM's proxy endpoint
+  // (tikwm.com/video/music/<id>.mp3) which works from Railway/cloud IPs because
+  // TikWM fetches from TikTok on your behalf. Falls back to direct CDN URL
+  // (often 403 on cloud), then yt-dlp as last resort.
   if (isTikTokUrl(source)) {
     try {
       const meta = await tiktokMeta(source);
       if (item.title === item.source) item.title = meta.title;
       if (!item.thumb && meta.thumb) item.thumb = meta.thumb;
-      logPretty("LOG", `[tikwm] audio <- ${meta.audioUrl.slice(0, 90)}...`);
-      // Pass the CDN URL + headers directly to ffmpeg instead of fetch()-piping.
-      // ffmpeg handles TikTok CDN better from cloud IPs than Node's fetch().
+      // Prefer TikWM proxy (works on cloud IPs); fall back to direct CDN URL.
+      const audioUrl = meta.proxyAudioUrl || meta.audioUrl;
+      logPretty("LOG", `[tikwm] audio via ${meta.proxyAudioUrl ? 'proxy' : 'CDN'} <- ${audioUrl.slice(0, 90)}...`);
       const headers = "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36\r\nReferer: https://www.tiktok.com/\r\n";
-      const pipeObj = spawnFfmpegFromDirectUrl(meta.audioUrl, headers);
+      const pipeObj = spawnFfmpegFromDirectUrl(audioUrl, headers);
       await playPipe(guild, item, state, pipeObj);
       return { pageUrl: source };
     } catch (e) {
-      logPretty("WARN", `[tikwm] ffmpeg direct failed (${e?.message || e}), falling back to yt-dlp`);
+      logPretty("WARN", `[tikwm] failed (${e?.message || e}), falling back to yt-dlp`);
     }
   }
 
