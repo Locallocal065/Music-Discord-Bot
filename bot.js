@@ -1489,7 +1489,7 @@ async function runDmMusicCommand(msg, guild, cmd, parts) {
   if (cmd === "play") {
     const q = parts.join(" ").trim();
     if (!q) return reply({ embeds: [errorEmbed(`Please give a song name or link\n**Example:** \`/play query:lofi hip hop\``)] });
-    if (!userVC) return reply({ embeds: [errorEmbed(`I'm not in a voice room in **${guild.name}** yet — run \`${BOT_PREFIX}setup\` in the server first.`)] });
+    if (!userVC) return reply({ embeds: [errorEmbed(`I'm not in a voice room in **${guild.name}** yet — run \`/setup\` in the server first.`)] });
     const item = { title: q, source: q, requestedBy: msg.author.tag, guild, voiceChannelId: userVC, textChannelId };
     state.queue.push(item);
     const shouldStart = !state.current;
@@ -1513,7 +1513,7 @@ async function runDmMusicCommand(msg, guild, cmd, parts) {
     const parsed = parseLimitFromArgs(parts);
     const q = parsed.tokens.join(" ").trim();
     if (!q) return reply({ embeds: [errorEmbed(`Please give a playlist link or search text\n**Example:** \`${BOT_PREFIX}playlist lofi playlist --limit 20\``)] });
-    if (!userVC) return reply({ embeds: [errorEmbed(`I'm not in a voice room in **${guild.name}** yet — run \`${BOT_PREFIX}setup\` in the server first.`)] });
+    if (!userVC) return reply({ embeds: [errorEmbed(`I'm not in a voice room in **${guild.name}** yet — run \`/setup\` in the server first.`)] });
     const items = await fetchPlaylistEntries(q, parsed.limit);
     if (!items.length) return reply({ embeds: [errorEmbed("No songs found in the playlist or search results")] });
     for (const { title, url, thumb, durationSec } of items) {
