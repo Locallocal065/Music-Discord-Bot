@@ -2837,20 +2837,19 @@ async function startPlayback(guild, item, state, stayPut = false) {
     source = `ytsearch1:${source}`;
   }
 
-  // TikTok: metadata via TikWM. Audio is streamed via TikWM's proxy endpoint
-  // (tikwm.com/video/music/<id>.mp3) which works from Railway/cloud IPs because
-  // TikWM fetches from TikTok on your behalf. Falls back to direct CDN URL
-  // (often 403 on cloud), then yt-dlp as last resort.
+  // TikTok: metadata via TikWM. Audio is streamed via Cloudflare Worker proxy
+  // to avoid Railway/AWS datacenter IP blocks. Falls back to yt-dlp.
   if (isTikTokUrl(source)) {
     try {
       const meta = await tiktokMeta(source);
       if (item.title === item.source) item.title = meta.title;
       if (!item.thumb && meta.thumb) item.thumb = meta.thumb;
-      // Prefer TikWM proxy (works on cloud IPs); fall back to direct CDN URL.
-      const audioUrl = meta.proxyAudioUrl || meta.audioUrl;
-      logPretty("LOG", `[tikwm] audio via ${meta.proxyAudioUrl ? 'proxy' : 'CDN'} <- ${audioUrl.slice(0, 90)}...`);
+      
+      // Use the Cloudflare proxy to fetch the TikTok CDN URL
+      const cfProxyUrl = "https://bold-wood-cfdb.locallocal065.workers.dev/?url=" + encodeURIComponent(meta.audioUrl);
+      logPretty("LOG", `[tikwm] audio via CF proxy <- ${meta.audioUrl.slice(0, 90)}...`);
       const headers = "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36\r\nReferer: https://www.tiktok.com/\r\n";
-      const pipeObj = spawnFfmpegFromDirectUrl(audioUrl, headers);
+      const pipeObj = spawnFfmpegFromDirectUrl(cfProxyUrl, headers);
       await playPipe(guild, item, state, pipeObj);
       return { pageUrl: source };
     } catch (e) {
