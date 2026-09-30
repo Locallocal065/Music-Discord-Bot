@@ -2,17 +2,14 @@ const fs = require('fs');
 let code = fs.readFileSync('bot.js', 'utf8');
 
 const funcsToMove = [
-  'makeEmbed', 'successEmbed', 'errorEmbed', 'infoEmbed', 'musicEmbed', 'buildNowPlayingEmbed', 'buildHelpEmbedSlash'
+  'isSpotifyUrl', 'normalizeSpotifyUrl', 'spotifyKind', 'fetchJsonWithTimeout', 
+  'spotifyTitle', 'spotifyTrackToSearchQuery', 'spotifyMeta',
+  'tiktokMeta', 'tiktokMetaOnce', 'tiktokHeaders', 'isTikTokUrl',
+  'getTitle', 'thumbFor', 'extractYouTubeIdSafe', 'pickThumb', 
+  'resolveTitleAndThumb', 'resolveFirstVideoUrl', 'extractYouTubeId', 'resolveVideoInfo'
 ];
-let embedsCode = "const { EmbedBuilder } = require('discord.js');\n\n" +
-  "const COLORS = {\n" +
-  "  success: 0x2e8b57,\n" +
-  "  error: 0xff4500,\n" +
-  "  info: 0x5865F2,\n" +
-  "  music: 0x9370DB,\n" +
-  "  queue: 0x4682B4,\n" +
-  "};\n\n";
 
+let metaCode = "const https = require('https');\nconst http = require('http');\nconst { isUrl } = require('./utils.js');\n\n";
 const exported = [];
 
 for (const fn of funcsToMove) {
@@ -47,19 +44,16 @@ for (const fn of funcsToMove) {
   
   if (end !== -1) {
     const fnCode = code.slice(start, end + 1);
-    embedsCode += fnCode + '\n\n';
+    metaCode += fnCode + '\n\n';
     exported.push(fn);
     code = code.slice(0, start) + code.slice(end + 1);
   }
 }
 
-// Extract COLORS from bot.js as well
-code = code.replace(/const COLORS = \{[\s\S]*?\};\n/, '');
+metaCode += 'module.exports = {\n  ' + exported.join(',\n  ') + '\n};\n';
 
-embedsCode += 'module.exports = {\n  COLORS,\n  ' + exported.join(',\n  ') + '\n};\n';
+fs.writeFileSync('function/metadata.js', metaCode);
 
-fs.writeFileSync('function/embeds.js', embedsCode);
-
-code = 'const { COLORS, ' + exported.join(', ') + ' } = require("./function/embeds.js");\n' + code;
+code = 'const { ' + exported.join(', ') + ' } = require("./function/metadata.js");\n' + code;
 fs.writeFileSync('bot.js', code);
 console.log('Moved: ' + exported.join(', '));

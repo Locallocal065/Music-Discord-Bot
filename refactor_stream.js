@@ -2,10 +2,16 @@ const fs = require('fs');
 let code = fs.readFileSync('bot.js', 'utf8');
 
 const funcsToMove = [
-  'dashLoginPage', 'sharedDashCss', 'dashPage', 'dashPageTailwind', 
-  'dashPlayerPageTailwind', 'dashPlayerPage'
+  'swallowPipeError', 'checkFfmpegAvailability', 'getDirectAudioUrlAndHeaders',
+  'buildFfmpegHeadersString', 'spawnFfmpegFromDirectUrl', 'spawnUniversalPipe',
+  'clampSpeed', 'combineAudioFilters', 'ffmpegStdinArgs', 'spawnFfmpegStdin',
+  'cushionStream', 'awaitPrebuffer', 'spawnTikTokPipe', 'cleanupCurrentPipeline'
 ];
-let uiCode = "const { cleanTitle, escHtml } = require('./utils.js');\n\n";
+
+let streamCode = "const { spawn } = require('child_process');\n" + 
+                 "const ytdl = require('yt-dlp-exec');\n" +
+                 "const { logPretty, writeLog } = require('./utils.js');\n" +
+                 "const { tiktokHeaders, resolveFirstVideoUrl } = require('./metadata.js');\n\n";
 const exported = [];
 
 for (const fn of funcsToMove) {
@@ -40,16 +46,16 @@ for (const fn of funcsToMove) {
   
   if (end !== -1) {
     const fnCode = code.slice(start, end + 1);
-    uiCode += fnCode + '\n\n';
+    streamCode += fnCode + '\n\n';
     exported.push(fn);
     code = code.slice(0, start) + code.slice(end + 1);
   }
 }
 
-uiCode += 'module.exports = {\n  ' + exported.join(',\n  ') + '\n};\n';
+streamCode += 'module.exports = {\n  ' + exported.join(',\n  ') + '\n};\n';
 
-fs.writeFileSync('function/dashboardUI.js', uiCode);
+fs.writeFileSync('function/stream.js', streamCode);
 
-code = 'const { ' + exported.join(', ') + ' } = require("./function/dashboardUI.js");\n' + code;
+code = 'const { ' + exported.join(', ') + ' } = require("./function/stream.js");\n' + code;
 fs.writeFileSync('bot.js', code);
 console.log('Moved: ' + exported.join(', '));
