@@ -2845,8 +2845,9 @@ async function startPlayback(guild, item, state, stayPut = false) {
       if (item.title === item.source) item.title = meta.title;
       if (!item.thumb && meta.thumb) item.thumb = meta.thumb;
       
-      // Use the proxy audio url from tikwm if available to bypass blocks
-      const fetchUrl = meta.proxyAudioUrl || meta.audioUrl;
+      // Use the direct TikTok CDN URL (meta.audioUrl). The proxyAudioUrl is behind Cloudflare
+      // and blocks datacenter IPs like Railway. Node.js fetch() works fine against TikTok CDN directly.
+      const fetchUrl = meta.audioUrl;
       logPretty("LOG", `[tikwm] audio (fetch) <- ${fetchUrl.slice(0, 90)}...`);
       
       // Node.js fetch() easily bypasses Cloudflare's Bot Fight Mode which was blocking
