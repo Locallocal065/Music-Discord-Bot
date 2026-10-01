@@ -803,9 +803,9 @@ function buildSettingsRow(state = null) {
   const row = new ActionRowBuilder().addComponents(
     new ButtonBuilder().setCustomId("mus_controls").setLabel(`Controls: ${shown ? "Show" : "Hidden"}`).setEmoji("🎛").setStyle(ButtonStyle.Secondary),
   );
-  if (!isBocchiSetup(state)) {
-    row.addComponents(new ButtonBuilder().setCustomId("mus_setup").setLabel("/setup").setEmoji("🛠").setStyle(ButtonStyle.Secondary));
-  }
+  // if (!isBocchiSetup(state)) {
+  //   row.addComponents(new ButtonBuilder().setCustomId("mus_setup").setLabel("/setup").setEmoji("🛠").setStyle(ButtonStyle.Secondary));
+  // }
   return row;
 }
 function buildControlRows(state = null) {
@@ -2845,16 +2845,16 @@ async function startPlayback(guild, item, state, stayPut = false) {
       if (item.title === item.source) item.title = meta.title;
       if (!item.thumb && meta.thumb) item.thumb = meta.thumb;
       
-      // Use the Cloudflare proxy to fetch the TikTok CDN URL
-      const cfProxyUrl = "https://bold-wood-cfdb.locallocal065.workers.dev/?url=" + encodeURIComponent(meta.audioUrl);
-      logPretty("LOG", `[tikwm] audio via CF proxy (fetch) <- ${meta.audioUrl.slice(0, 90)}...`);
+      // Use the proxy audio url from tikwm if available to bypass blocks
+      const fetchUrl = meta.proxyAudioUrl || meta.audioUrl;
+      logPretty("LOG", `[tikwm] audio (fetch) <- ${fetchUrl.slice(0, 90)}...`);
       
       // Node.js fetch() easily bypasses Cloudflare's Bot Fight Mode which was blocking
       // ffmpeg and yt-dlp on Railway datacenter IPs. We fetch the stream and pipe it.
-      const res = await fetch(cfProxyUrl, {
+      const res = await fetch(fetchUrl, {
         headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36' }
       });
-      if (!res.ok) throw new Error(`CF proxy returned ${res.status}`);
+      if (!res.ok) throw new Error(`Fetch returned ${res.status}`);
       
       const { Readable } = require("stream");
       const pipeObj = spawnFfmpegStdin("tiktok-cf", consumeOffset(item, state));
